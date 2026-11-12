@@ -236,13 +236,14 @@ export class BackendController {
    */
   getStatistics() {
     const engineStats = validationEngine.getStatistics();
+    const fixes = fixCoordinator.getStatistics();
 
     return {
       totalValidations: this.statistics.totalValidations,
       failedValidations: this.statistics.failedValidations,
-      successfulFixes: this.statistics.successfulFixes,
-      totalFixAttempts: this.statistics.totalFixAttempts,
-      userCancellations: this.statistics.userCancellations,
+      successfulFixes: fixes.successfulFixes,
+      totalFixAttempts: fixes.totalTasks,
+      userCancellations: fixes.userCancellations,
       lastActivity: this.statistics.lastActivity,
       engineValidations: engineStats.validationCount,
       activeRules: engineStats.activeRulesCount,
@@ -428,22 +429,10 @@ export class BackendController {
         return { success: false, reason: '消息已通过验证，无需修复' };
       }
 
-      // 获取第一个失败规则的缺失项
-      const failedRule = validationResult.failedRules[0];
-      if (!failedRule) {
-        return { success: false, reason: '无法确定修复策略' };
-      }
-
-      // 触发手动修复
       const result = await fixCoordinator.triggerManualFix(
-        messageId,
-        messageData.content,
-        failedRule.missingContent,
-        strategy || failedRule.fixStrategy,
+        messageId, messageData.content, validationResult.missingContent,
+        strategy || validationResult.fixStrategy, validationResult.metadata.ruleId,
       );
-
-      // 更新统计
-      this.statistics.totalFixAttempts++;
       this._updateUIStatistics();
 
       return result;
@@ -463,13 +452,6 @@ export class BackendController {
     try {
       const result = await fixCoordinator.confirmFix(messageId, confirmed);
 
-      // 更新统计
-      if (confirmed && result.success) {
-        this.statistics.successfulFixes++;
-      } else if (!confirmed) {
-        this.statistics.userCancellations++;
-      }
-
       this._updateUIStatistics();
       return result;
     } catch (error) {
@@ -485,27 +467,33 @@ export class BackendController {
    * @param {string|null} strategy 策略（可选，为空则尝试所有策略）
    * @returns {{success:boolean, newContent:string, strategy:string|null, reason?:string}}
    */
-  previewFix(content, missingItems = [], strategy = null) {
+  previewFix(content, missingItems = [], strategy = null, rule = null) {
+    const previousEnabled = autoFixEngine.isEnabled;
+    window.ResponseLinter = window.ResponseLinter || {};
+    const previousRule = window.ResponseLinter.CurrentRule;
     try {
-      if (!content || typeof content !== 'string') {
-        return { success: false, newContent: content || '', strategy: null, reason: '无效内容' };
-      }
-
-      // 确保修复引擎处于启用状态，仅用于预览计算
-      const prevEnabled = autoFixEngine.isEnabled;
+      if (!content || typeof content !== 'string') return { success: false, reason: '无效内容' };
+      if (rule) window.ResponseLinter.CurrentRule = rule;
       autoFixEngine.setEnabled(true);
-      const res = autoFixEngine.attemptFix(content, missingItems, strategy);
-      autoFixEngine.setEnabled(prevEnabled);
-
-      if (!res.success) {
-        return { success: false, newContent: content, strategy: null, reason: res.metadata?.reason || '无法生成修复预览' };
-      }
-
-      return { success: true, newContent: res.fixedContent, strategy: res.strategy };
-    } catch (error) {
-      console.error('预览修复失败:', error);
-      return { success: false, newContent: content, strategy: null, reason: error.message };
+      const result = autoFixEngine.attemptFix(content, missingItems, strategy);
+      return { success: result.success, newContent: result.fixedContent, strategy: result.strategy,
+        reason: result.metadata?.reason };
+    } finally {
+      autoFixEngine.setEnabled(previousEnabled);
+      window.ResponseLinter.CurrentRule = previousRule;
     }
+  }
+
+  getLatestAIMessage() { return messageHandler.getLatestAIMessage(); }
+
+  previewLatestFix() {
+    const latest = this.getLatestAIMessage();
+    if (!latest) return { success: false, reason: '未找到AI消息' };
+    const result = validationEngine.validateMessage(latest.content, latest.id);
+    if (!result || result.isValid) return { success: false, reason: '当前消息无需修复' };
+    const rule = validationEngine.activeRules.find(item => item.id === result.metadata.ruleId);
+    return { ...this.previewFix(latest.content, result.missingContent, result.fixStrategy, rule),
+      originalContent: latest.content };
   }
 
 /**
@@ -564,14 +552,14 @@ export class BackendController {
     try {
       const coordinatorStats = fixCoordinator.getStatistics();
       return {
-        totalAttempts: this.statistics.totalFixAttempts,
-        successfulFixes: this.statistics.successfulFixes,
-        userCancellations: this.statistics.userCancellations,
+        totalAttempts: coordinatorStats.totalTasks,
+        successfulFixes: coordinatorStats.successfulFixes,
+        userCancellations: coordinatorStats.userCancellations,
         queueLength: coordinatorStats.queueLength || 0,
         isProcessing: coordinatorStats.isProcessing || false,
         successRate:
-          this.statistics.totalFixAttempts > 0
-            ? Math.round((this.statistics.successfulFixes / this.statistics.totalFixAttempts) * 100)
+          coordinatorStats.totalTasks > 0
+            ? Math.round((coordinatorStats.successfulFixes / coordinatorStats.totalTasks) * 100)
             : 0,
       };
     } catch (error) {
