@@ -1,3 +1,5 @@
+import { getRequiredContent } from './rule-options.js';
+
 // Response Linter 自动修复引擎
 // 基于策略模式实现多种修复策略，安全地修复AI回复格式问题
 
@@ -97,13 +99,14 @@ export class ThinkingContentFixStrategy extends FixStrategy {
       if (trimmedAfter.length > 0 && !trimmedAfter.startsWith('<content>')) {
         // 如果有内容但没有 <content> 标签：仅保证标签独占行（不强制插入空行），满足“两个标签不同行”的新规范
         const needsContentEnd = missingItems.includes('</content>');
-        const contentStart = '\n<content>\n';
+        const contentStart = missingItems.includes('<content>') ? '\n<content>\n' : '\n';
         const contentEnd = needsContentEnd ? '\n</content>' : '';
         const body = String(trimmedAfter).replace(/\s+$/, '');
         return beforeThinking + contentStart + body + (body.endsWith('\n') ? '' : '\n') + contentEnd;
       } else if (trimmedAfter.length === 0) {
         // 如果 </thinking> 后没有内容，添加空的 content 标签（留出一行供模型填充）
-        return beforeThinking + '\n\n<content>\n\n</content>';
+        return beforeThinking + (missingItems.includes('<content>') ? '\n<content>\n' : '') +
+          (missingItems.includes('</content>') ? '\n</content>' : '');
       }
 
       return content;
@@ -118,7 +121,7 @@ export class ThinkingContentFixStrategy extends FixStrategy {
     const hasThinking = fixedContent.includes('<thinking>') && fixedContent.includes('</thinking>');
     const hasContent = fixedContent.includes('<content>') && fixedContent.includes('</content>');
 
-    return hasThinking && hasContent && super.validate(fixedContent, originalMissingItems);
+    return super.validate(fixedContent, originalMissingItems);
   }
 }
 
@@ -189,7 +192,7 @@ export class SanitizeExtraTagsStrategy extends FixStrategy {
 
   _getAllowedTagNames() {
     try {
-      const seq = window.ResponseLinter?.CurrentRule?.requiredContent || [];
+      const seq = getRequiredContent(window.ResponseLinter?.CurrentRule);
       const names = new Set();
       seq.forEach(item => {
         if (typeof item === 'string' && item.startsWith('<') && item.endsWith('>')) {
@@ -262,7 +265,7 @@ export class PositionalFixStrategy extends FixStrategy {
 
       // 从外部规则注入顺序信息（若可用）
       // 约定：window.ResponseLinter?.CurrentRule?.requiredContent 提供当前规则顺序
-      this._requiredSeq = window.ResponseLinter?.CurrentRule?.requiredContent || [];
+      this._requiredSeq = getRequiredContent(window.ResponseLinter?.CurrentRule);
 
       // 为每个缺失项找到最佳插入位置
       for (const missingItem of missingItems) {
@@ -422,7 +425,7 @@ export class PositionalFixStrategy extends FixStrategy {
       // doubleNewline=true：在标签两侧都留出一个空行
       switch (position.type) {
         case 'after-thinking':
-          insertText = `\n${item}\n`;
+          insertText = `\n\n${item}\n\n`;
           break;
         case 'before-next-tag':
           insertText = `\n\n${item}\n\n`;
@@ -609,7 +612,7 @@ export class CustomFixStrategy extends FixStrategy {
 
   canFix(content, missingItems) {
     try {
-      if (!this.pattern || !this.replacement) {
+      if (!this.pattern || typeof this.replacement !== 'string') {
         return false;
       }
 
@@ -624,7 +627,7 @@ export class CustomFixStrategy extends FixStrategy {
 
   fix(content, missingItems) {
     try {
-      if (!this.pattern || !this.replacement) {
+      if (!this.pattern || typeof this.replacement !== 'string') {
         return content;
       }
 
@@ -678,6 +681,7 @@ export class AutoFixEngine {
     // 注册默认修复策略
     this.registerStrategy('thinking-content', new ThinkingContentFixStrategy());
     this.registerStrategy('balance-pairs', new MissingTagsFixStrategy());
+    this.registerStrategy('add-missing-tags', this.strategies.get('balance-pairs'));
     // 位置感知拆分为两个微策略；保留旧 positional 以兼容
     this.registerStrategy('after-prev', new PositionalFixStrategy({ mode: 'after-prev' }));
     this.registerStrategy('before-next', new PositionalFixStrategy({ mode: 'before-next' }));
@@ -738,7 +742,7 @@ export class AutoFixEngine {
       if (!strategyName || typeof strategyName === 'string') {
         const rule = window.ResponseLinter?.CurrentRule || null;
         if (rule && rule.contentOptions && Array.isArray(rule.requiredContent)) {
-          for (const item of rule.requiredContent) {
+          for (const item of getRequiredContent(rule)) {
             const opt = rule.contentOptions[item];
             if (!opt || opt.enabled === false) continue;
             const acts = Array.isArray(opt.actions) ? opt.actions : [];
@@ -756,13 +760,16 @@ export class AutoFixEngine {
       pipelineNames = pipelineNames.filter((n, i, arr) => arr.indexOf(n) === i);
 
       // 若包含 custom，则从当前规则读取 pattern + replacement 并注册策略（覆盖之前注册的custom）
+      this.strategies.delete('custom');
       if (pipelineNames.includes('custom')) {
         const rule = window.ResponseLinter?.CurrentRule || null;
-        if (rule && rule.contentOptions) {
+        if (rule?.customPattern && typeof rule.customReplacement === 'string') {
+          this.registerCustomStrategy(rule.customPattern, rule.customReplacement, '规则自定义修复');
+        } else if (rule && rule.contentOptions) {
           const seq = Array.isArray(rule.requiredContent) ? rule.requiredContent : Object.keys(rule.contentOptions);
           for (const key of seq) {
             const opt = rule.contentOptions[key];
-            if (opt && Array.isArray(opt.actions) && opt.actions.includes('custom') && opt.pattern && typeof opt.replacement === 'string') {
+            if (opt && opt.enabled !== false && Array.isArray(opt.actions) && opt.actions.includes('custom') && opt.pattern && typeof opt.replacement === 'string') {
               try { this.registerCustomStrategy(opt.pattern, opt.replacement, `规则自定义修复: ${key}`); } catch {}
               break;
             }
@@ -770,10 +777,11 @@ export class AutoFixEngine {
         }
       }
 
-      const pipeline = (pipelineNames.length ? pipelineNames : Array.from(this.strategies.keys()))
+      const pipeline = (pipelineNames.length ? pipelineNames : ['thinking-content', 'balance-pairs', 'positional'])
         .map(n => this.strategies.get(n))
         .filter(Boolean);
 
+      const originalMissingItems = [...missingItems];
       let current = content;
       const executed = [];
 
@@ -812,7 +820,7 @@ export class AutoFixEngine {
           originalContent: content,
           fixedContent: current,
           strategy: executed.join(' | '),
-          fixedItems: this._findFixedItems(content, current, missingItems),
+          fixedItems: this._findFixedItems(content, current, originalMissingItems),
           metadata: { pipeline: executed, fixTime: new Date(), contentLengthChange: current.length - content.length },
         };
         this._recordFixHistory(result);
@@ -820,28 +828,7 @@ export class AutoFixEngine {
         return result;
       }
 
-      // 若是单策略模式则回退到旧逻辑尝试全部已注册策略
-      if (!Array.isArray(strategyName)) {
-        for (const strategy of Array.from(this.strategies.values())) {
-          if (strategy.canFix(content, missingItems)) {
-            const fixedContent = strategy.fix(content, missingItems);
-            if (strategy.validate(fixedContent, missingItems)) {
-              const result = {
-                success: true,
-                originalContent: content,
-                fixedContent,
-                strategy: strategy.name,
-                fixedItems: this._findFixedItems(content, fixedContent, missingItems),
-                metadata: { strategyDescription: strategy.description, fixTime: new Date(), contentLengthChange: fixedContent.length - content.length },
-              };
-              this._recordFixHistory(result);
-              console.log(`修复成功 - 策略: ${strategy.name}`, result);
-              return result;
-            }
-          }
-        }
-      }
-
+      // 不回退到未选择的策略，尤其不能隐式删除其他标签。
       return { success: false, originalContent: content, fixedContent: content, strategy: null, fixedItems: [], metadata: { reason: '没有适用的修复策略' } };
     } catch (error) {
       console.error('修复过程出错:', error);

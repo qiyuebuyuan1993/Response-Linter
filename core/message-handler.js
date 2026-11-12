@@ -35,6 +35,15 @@ export class MessageHandler {
     this.retryCounts = new Map(); // 消息重试计数，处理上下文尚未就绪等瞬态失败
     this.rebindTimer = null; // 绑定失败时的周期性重试定时器
     this.domObserver = null; // DOM 观察器回退方案
+    this.writingMessages = new Set();
+    document.addEventListener('responseLinter.messageWriteStarted', event => {
+      this.writingMessages.add(String(event.detail.messageId));
+    });
+    document.addEventListener('responseLinter.messageWriteFinished', event => {
+      const id = String(event.detail.messageId);
+      this.lastContent.set(id, event.detail.content.trim());
+      this.writingMessages.delete(id);
+    });
   }
 
   /**
@@ -208,6 +217,7 @@ export class MessageHandler {
    * @param {string} messageId - 消息ID
    */
   async _handleMessageRendered(messageId) {
+    if (this.writingMessages.has(String(messageId))) return;
     // 内容级去重由 _processMessage 负责；这里仅用 processedMessages 作为极端护栏
     // 防抖：短时间内重复事件直接丢弃（防止同源多事件风暴）
     const lastAt = this.lastHandledAt.get(messageId) || 0;
@@ -272,6 +282,7 @@ export class MessageHandler {
    * @param {string} messageId - 消息ID
    */
   async _processMessage(messageId) {
+    if (this.writingMessages.has(String(messageId))) return true;
     const messageData = this.extractMessage(messageId);
 
     if (!messageData) {
@@ -320,7 +331,7 @@ export class MessageHandler {
   extractMessage(messageId) {
     try {
       // 优先用缓存的 ctxRef，降低偶发空窗口
-      const context = this.ctxRef || safeGetContext() || null;
+      const context = safeGetContext() || this.ctxRef || null;
 
       if (!context || !Array.isArray(context?.chat)) {
         console.warn('无法获取聊天上下文');

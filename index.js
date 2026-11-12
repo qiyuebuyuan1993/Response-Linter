@@ -539,6 +539,8 @@ function setupBackendEventHandlers() {
     showFixConfirmationDialog(messageId, originalContent, newContent, strategy);
   });
 
+  document.addEventListener('responseLinter.fixStatisticsChanged', () => UIState.updateStatistics());
+
   // 监听修复应用成功事件
   document.addEventListener('responseLinter.fixApplied', event => {
     const { task, fixResult } = event.detail;
@@ -761,17 +763,28 @@ function setupEventHandlers() {
       }
 
       if (result.success) {
-        toastr.success('修复任务已提交', '响应检查器');
+        toastr.success('修复已应用', '响应检查器');
         UIState.updateStatistics();
-      } else {
+      } else if (!result.metadata?.requiresConfirmation) {
         toastr.error(result.reason || '修复失败', '响应检查器');
       }
     } catch (error) {
       console.error('手动修复失败:', error);
       toastr.error('修复过程出错', '响应检查器');
     } finally {
-      button.prop('disabled', false).html(originalText);
+      button.html(originalText);
+      UIState.updateStatistics();
     }
+  });
+
+  $('#rl-undo-fix').on('click', async function () {
+    $(this).prop('disabled', true);
+    try {
+      const id = UIState.getLatestAIMessageId();
+      if (id === null) return;
+      const result = await backendController.undoFix(id);
+      if (!result.success) toastr.warning(result.metadata?.reason || '撤销失败', '响应检查器');
+    } finally { UIState.updateStatistics(); }
   });
 
   // 规则编辑器模态框事件
@@ -814,23 +827,6 @@ function setupEventHandlers() {
   $(document).on('click', '.rl-remove-tag', function () {
     const content = $(this).data('content');
     RuleEditor.removeContentTag(content);
-  });
-
-  // 新滑块系统的事件绑定（由模块内部处理，这里保留作为备用）
-  $(document).on('click', '.rl-delete-content', function (e) {
-    e.stopPropagation();
-    const content = $(this).closest('.rl-content-item').data('content');
-    if (content && window.ResponseLinter?.RuleEditor) {
-      window.ResponseLinter.RuleEditor.removeContentTag(content);
-    }
-  });
-
-  $(document).on('change', '.rl-content-enabled', function (e) {
-    const itemEl = $(this).closest('.rl-content-item')[0];
-    const enabled = $(this).prop('checked');
-    if (itemEl && window.ResponseLinter?.RuleEditor) {
-      window.ResponseLinter.RuleEditor.toggleContentItem(itemEl, enabled);
-    }
   });
 
   // 点击外部关闭模态框

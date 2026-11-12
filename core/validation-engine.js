@@ -1,3 +1,5 @@
+import { getRequiredContent } from './rule-options.js';
+
 // Response Linter 验证引擎核心模块
 // 负责AI回复内容的规则验证和结果处理
 
@@ -103,12 +105,7 @@ export class ValidationEngine {
    * @returns {ValidationResult} 验证结果
    */
   _validateSingleRule(content, rule, messageId) {
-    const { requiredContent } = rule;
-
-    // 清洗必需项：过滤空白/孤立逗号等无效条目，避免出现“缺失内容：,”等噪音
-    const sanitizedRequired = Array.isArray(requiredContent)
-      ? requiredContent.filter(it => typeof it === 'string' && it.trim() && it.trim() !== ',')
-      : [];
+    const sanitizedRequired = getRequiredContent(rule);
 
     // 执行位置感知验证
     const positionResults = this._validateContentPositions(content, sanitizedRequired);
@@ -146,19 +143,26 @@ export class ValidationEngine {
    */
   _validateContentPositions(content, requiredItems) {
     const results = [];
+    let cursor = 0;
+    const consumed = new Map();
 
     for (let i = 0; i < requiredItems.length; i++) {
       const item = requiredItems[i];
       const positions = this._findAllPositions(content, item);
+      const used = consumed.get(item) || new Set();
+      const available = positions.filter(position => !used.has(position));
+      const selected = available.find(position => position >= cursor) ?? available[0] ?? -1;
+      if (selected >= 0) { used.add(selected); cursor = Math.max(cursor, selected + item.length); }
+      consumed.set(item, used);
 
       results.push({
         item: item,
         index: i,
         expectedOrder: i,
         positions: positions,
-        found: positions.length > 0,
-        firstPosition: positions.length > 0 ? positions[0] : -1,
-        lastPosition: positions.length > 0 ? positions[positions.length - 1] : -1,
+        found: selected >= 0,
+        firstPosition: selected,
+        lastPosition: selected,
       });
     }
 
@@ -181,7 +185,7 @@ export class ValidationEngine {
       if (index === -1) break;
 
       // 忽略代码片段中的匹配（例如 1.`<content>` 这样的演示文本）
-      if (this._isInCodeSpan(content, index)) {
+      if (!item.includes('`') && this._isInCodeSpan(content, index)) {
         startIndex = index + item.length;
         continue;
       }
@@ -230,7 +234,7 @@ export class ValidationEngine {
       const current = foundItems[i];
       const previous = foundItems[i - 1];
 
-      // 使用“前一项的最后出现位置”进行顺序校验，确保后续项必须位于其之后
+      // 每个规则项消费一次匹配，允许消息包含多组重复结构
       if (current.firstPosition < previous.lastPosition) {
         orderErrors.push({
           item: current.item,
@@ -247,7 +251,7 @@ export class ValidationEngine {
       const current = foundItems[i];
       const next = foundItems[i + 1];
       if (current.lastPosition > next.firstPosition) {
-        beforeHints.push({ item: next.item, expectedBefore: current.item, actualPosition: next.firstPosition, expectedBeforePosition: current.lastPosition });
+        beforeHints.push({ item: current.item, expectedBefore: next.item, actualPosition: current.lastPosition, expectedBeforePosition: next.firstPosition });
       }
     }
 

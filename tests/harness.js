@@ -38,23 +38,17 @@ function summary() {
   el.innerHTML = `<p>通过 ${okCount} / ${total} 项</p>`;
 }
 
-// 导入核心模块
-import { backendController as _bc } from './imports.js';
-
-// 构建 imports.js 动态（避免 ES 模块相对路径噪声）
-// 由于直接 import 路径需静态，我们在此手动拼装导入
-
-/* imports.js 内容（虚拟说明）：
-export { createBackendController } from '../core/backend-controller.js';
-*/
-
-// 直接在此处动态加载后端控制器（为简化，我们内联一个创建器）
-import { createBackendController } from '../core/backend-controller.js';
-const backendController = createBackendController('response-linter');
-
-// 开启修复引擎（预览时需要）
+// 浏览器夹具只导入纯引擎，不依赖酒馆桥接或不存在的 imports.js。
+import { validationEngine } from '../core/validation-engine.js';
 import { autoFixEngine } from '../core/auto-fix-engine.js';
-autoFixEngine.setEnabled(true);
+const backendController = {
+  initialize(settings) { validationEngine.initialize(settings.rules, settings.enabled); autoFixEngine.setEnabled(true); },
+  validateContent(content, id) { return validationEngine.validateMessage(content, id); },
+  previewFix(content, missing, strategy) {
+    const result = autoFixEngine.attemptFix(content, missing, strategy);
+    return { ...result, newContent: result.fixedContent };
+  },
+};
 
 // 初始化验证引擎所需设置
 const baseRule = {

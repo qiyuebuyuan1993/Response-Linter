@@ -149,6 +149,8 @@ export class RulesManagerUI {
         fixStrategy: ruleData.fixStrategy,
         positionalOptions: ruleData.positionalOptions, // 新增：位置感知选项
         createdAt: new Date().toISOString(),
+        customPattern: ruleData.customPattern || '',
+        customReplacement: ruleData.customReplacement ?? '',
         contentOptions: ruleData.contentOptions || {}, // 每项内容的修复绑定
       };
 
@@ -193,6 +195,8 @@ export class RulesManagerUI {
           requiredContent: ruleData.requiredContent,
           fixStrategy: ruleData.fixStrategy,
           positionalOptions: ruleData.positionalOptions, // 新增：保存位置感知选项
+          customPattern: ruleData.customPattern || '',
+          customReplacement: ruleData.customReplacement ?? '',
           contentOptions: ruleData.contentOptions || this.uiState.rules[ruleIndex].contentOptions || {},
           updatedAt: new Date().toISOString(),
         };
@@ -311,12 +315,7 @@ export class RulesManagerUI {
 
       const extensionName = 'response-linter';
 
-      // 过滤掉被禁用的内容项（contentOptions.enabled=false 的项不参与 requiredContent）
-      this.uiState.rules = this.uiState.rules.map(rule => {
-        if (!rule.contentOptions) return rule;
-        const enabledTags = (rule.requiredContent || []).filter(tag => rule.contentOptions[tag]?.enabled !== false);
-        return { ...rule, requiredContent: enabledTags };
-      });
+      // 禁用项保留在配置中，验证和修复时再过滤。
 
       // 保存到扩展设置
       settingsRoot[extensionName] = settingsRoot[extensionName] || {};

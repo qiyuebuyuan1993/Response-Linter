@@ -53,7 +53,7 @@ export class FixCoordinator {
     this.requireConfirmation = (settings?.defaultAutoFixAction === 'preview');
 
     // 启用相关服务
-    autoFixEngine.setEnabled(this.isEnabled && this.autoFixEnabled);
+    autoFixEngine.setEnabled(this.isEnabled);
     messageModifier.setEnabled(this.isEnabled);
 
     console.log(`修复协调器已初始化 - 自动修复: ${this.autoFixEnabled ? '启用' : '禁用'}，默认行为: ${this.requireConfirmation ? '预览确认' : '直接应用'}`);
@@ -69,7 +69,7 @@ export class FixCoordinator {
     this.requireConfirmation = (settings?.defaultAutoFixAction === 'preview');
 
     // 同步更新相关服务
-    autoFixEngine.setEnabled(this.isEnabled && this.autoFixEnabled);
+    autoFixEngine.setEnabled(this.isEnabled);
     messageModifier.setEnabled(this.isEnabled);
 
     console.log(`修复协调器设置已更新 - 自动修复: ${this.autoFixEnabled ? '启用' : '禁用'}，默认行为: ${this.requireConfirmation ? '预览确认' : '直接应用'}`);
@@ -164,10 +164,13 @@ export class FixCoordinator {
    * @param {FixTask} task - 修复任务
    */
   _addToQueue(task) {
+    task.message = messageModifier._getMessage(task.messageId);
+    task.swipeId = task.message?.swipe_id;
     // 检查队列大小
     if (this.fixQueue.length >= this.maxQueueSize) {
       console.warn('修复队列已满，丢弃最旧的任务');
-      this.fixQueue.shift();
+      const dropped = this.fixQueue.shift();
+      dropped.resolve?.({ success: false, reason: '修复队列已满' });
     }
 
     // 按优先级插入队列
@@ -199,7 +202,9 @@ export class FixCoordinator {
       const task = this.fixQueue.shift();
 
       try {
-        await this._processFixTask(task);
+        const result = await this._processFixTask(task);
+        task.resolve?.(result);
+        this._dispatchFixEvent('fixStatisticsChanged', {});
 
         // 添加小延迟避免阻塞UI
         await this._sleep(100);
@@ -207,6 +212,7 @@ export class FixCoordinator {
         console.error('处理修复任务失败:', error, task);
         task.status = 'failed';
         this.statistics.failedFixes++;
+        task.resolve?.({ success: false, reason: error.message });
       }
     }
 
@@ -220,6 +226,10 @@ export class FixCoordinator {
    */
   async _processFixTask(task) {
     try {
+      if (!this.isEnabled) return { success: false, reason: '扩展未启用' };
+      if (messageModifier._getMessage(task.messageId) !== task.message || task.message?.swipe_id !== task.swipeId) {
+        return { success: false, reason: '聊天或候选回复已切换，请重新修复' };
+      }
       task.status = 'processing';
       this.statistics.totalTasks++;
 
@@ -228,12 +238,17 @@ export class FixCoordinator {
       // 尝试自动修复
       // 将当前任务对应的规则顺序暴露给修复引擎（用于查找下一个/上一个标签）
       try {
-        const rule = (window.UIState?.rules || []).find(r => r.id === task.ruleId) || null;
+        const rule = validationEngine.activeRules.find(r => r.id === task.ruleId) || null;
         window.ResponseLinter = window.ResponseLinter || {};
         window.ResponseLinter.CurrentRule = rule || null;
       } catch (e) {}
 
       const fixResult = autoFixEngine.attemptFix(task.content, task.missingItems, task.fixStrategy);
+      const rule = validationEngine.activeRules.find(r => r.id === task.ruleId);
+      if (fixResult.success && rule && !validationEngine._validateSingleRule(fixResult.fixedContent, rule, task.messageId).isValid) {
+        fixResult.success = false;
+        fixResult.metadata = { reason: '修复后仍不满足当前规则，未修改消息' };
+      }
 
       if (fixResult.success) {
         // 修复成功，应用到消息
@@ -242,6 +257,7 @@ export class FixCoordinator {
           fixResult.fixedContent,
           task.fixStrategy,
           this.requireConfirmation,
+          task.content,
         );
 
         if (modificationResult.success) {
@@ -269,15 +285,17 @@ export class FixCoordinator {
           this.statistics.failedFixes++;
           console.error(`修复任务失败 - 消息修改失败 [${task.messageId}]`, modificationResult);
         }
+        return { ...modificationResult, reason: modificationResult.metadata?.reason };
       } else {
         task.status = 'failed';
         this.statistics.failedFixes++;
-        console.log(`修复任务失败 - 无法修复 [${task.messageId}]`, fixResult);
+        return { success: false, reason: fixResult.metadata?.reason || '无法修复' };
       }
     } catch (error) {
       task.status = 'failed';
       this.statistics.failedFixes++;
       console.error('处理修复任务出错:', error, task);
+      return { success: false, reason: error.message };
     }
   }
 
@@ -403,7 +421,7 @@ export class FixCoordinator {
     if (confirmed && result.success) {
       this.statistics.successfulFixes++;
       this._dispatchFixEvent('fixConfirmed', { messageId, result });
-    } else if (!confirmed) {
+    } else if (!confirmed && result.metadata?.reason === '用户取消修改') {
       this.statistics.userCancellations++;
       this._dispatchFixEvent('fixCancelled', { messageId });
     }
@@ -435,21 +453,19 @@ export class FixCoordinator {
    * @param {string} strategy - 修复策略
    * @returns {Promise<Object>} 修复结果
    */
-  async triggerManualFix(messageId, content, missingItems, strategy) {
-    const fixTask = {
-      messageId,
-      content,
-      missingItems,
-      ruleName: 'manual',
-      fixStrategy: strategy,
-      priority: 100, // 手动修复最高优先级
-      createdAt: new Date(),
-      status: 'pending',
-    };
+  async triggerManualFix(messageId, content, missingItems, strategy, ruleId = null) {
+    if (!this.isEnabled) return { success: false, reason: '扩展未启用' };
+    if (!strategy) return { success: false, reason: '此规则未配置修复策略' };
+    return new Promise(resolve => this._addToQueue({
+      messageId, content, missingItems, ruleId, fixStrategy: strategy,
+      ruleName: 'manual', priority: 100, createdAt: new Date(), status: 'pending', resolve,
+    }));
+  }
 
-    this._addToQueue(fixTask);
-
-    return { success: true, taskAdded: true };
+  getModificationHistory(messageId) { return messageModifier.getModificationHistory(messageId); }
+  canUndo(messageId) { return messageModifier.canUndo(messageId); }
+  resetStatistics() {
+    this.statistics = { totalTasks: 0, successfulFixes: 0, failedFixes: 0, userCancellations: 0 };
   }
 
   /**
@@ -541,8 +557,8 @@ export class FixCoordinator {
    * 清理队列和历史
    */
   cleanup() {
+    for (const task of this.fixQueue) task.resolve?.({ success: false, reason: '任务已取消' });
     this.fixQueue = [];
-    this.isProcessing = false;
     messageModifier.clearHistory();
     autoFixEngine.clearHistory();
 

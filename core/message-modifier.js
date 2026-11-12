@@ -4,7 +4,7 @@
 // 统一通过 getContext() 与宿主交互，避免直接导入 extensions.js
 // 优先从 st-context.js 模块导入以避免全局未暴露导致的 ReferenceError
 import { getContext as ST_getContext } from '../../../../st-context.js';
-const __getCtx = () => { try { if (typeof getContext === 'function') return getContext(); if (typeof ST_getContext === 'function') return ST_getContext(); return (window.getContext ? window.getContext() : null); } catch { return null; } };
+const __getCtx = () => { try { if (window.SillyTavern?.getContext) return window.SillyTavern.getContext(); if (typeof getContext === 'function') return getContext(); if (typeof ST_getContext === 'function') return ST_getContext(); return (window.getContext ? window.getContext() : null); } catch { return null; } };
 
 /**
  * 修改历史记录数据结构
@@ -36,6 +36,7 @@ export class MessageModifier {
     this.maxHistoryPerMessage = 10;
     this.isEnabled = false;
     this.pendingModifications = new Map(); // 待确认的修改
+    this.activeWrites = new Set();
   }
 
   /**
@@ -55,7 +56,8 @@ export class MessageModifier {
    * @param {boolean} requireConfirmation - 是否需要用户确认
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async modifyMessage(messageId, newContent, strategy = 'manual', requireConfirmation = false) {
+  async modifyMessage(messageId, newContent, strategy = 'manual', requireConfirmation = false, expectedContent = null) {
+    messageId = String(messageId);
     if (!this.isEnabled) {
       return {
         success: false,
@@ -79,7 +81,10 @@ export class MessageModifier {
         };
       }
 
-      const originalContent = currentMessage.extra?.display_text || currentMessage.mes || '';
+      const originalContent = currentMessage.extra?.display_text ?? currentMessage.mes ?? '';
+      if (expectedContent !== null && originalContent.trim() !== expectedContent.trim()) {
+        return { success: false, metadata: { reason: '消息已发生变化，请重新检查后修复' } };
+      }
 
       // 如果内容没有变化，直接返回成功
       if (originalContent === newContent) {
@@ -121,62 +126,65 @@ export class MessageModifier {
    * @returns {Promise<ModificationResult>} 修改结果
    */
   async _executeModification(messageId, originalContent, newContent, strategy) {
+    const message = this._getMessage(messageId);
+    if (!message) return { success: false, metadata: { reason: '找不到指定的消息' } };
+    const before = this._snapshot(message);
+    const after = { ...before, mes: newContent, hasDisplay: true, display: newContent,
+      hasExtra: true, swipe: before.hasSwipe ? newContent : before.swipe };
+    const result = await this._writeState(messageId, message, after);
+    if (result.success) this._recordModification(messageId, originalContent, newContent, strategy, message, before, after);
+    return { ...result, messageId, originalContent, newContent };
+  }
+
+  _snapshot(message) {
+    const hasSwipe = Array.isArray(message.swipes) && Number.isInteger(message.swipe_id) &&
+      message.swipe_id >= 0 && message.swipe_id < message.swipes.length;
+    return {
+      mes: message.mes, hasExtra: !!message.extra,
+      hasDisplay: Object.prototype.hasOwnProperty.call(message.extra || {}, 'display_text'),
+      display: message.extra?.display_text, swipeId: message.swipe_id,
+      hasSwipe, swipe: hasSwipe ? message.swipes[message.swipe_id] : undefined,
+    };
+  }
+
+  _restore(message, state) {
+    message.mes = state.mes;
+    if (state.hasDisplay) {
+      message.extra = message.extra || {};
+      message.extra.display_text = state.display;
+    } else if (message.extra) {
+      delete message.extra.display_text;
+      if (!state.hasExtra && Object.keys(message.extra).length === 0) delete message.extra;
+    }
+    if (state.hasSwipe) message.swipes[state.swipeId] = state.swipe;
+  }
+
+  async _writeState(messageId, message, state) {
+    if (this.activeWrites.has(messageId)) return { success: false, metadata: { reason: '此消息正在保存，请稍后重试' } };
+    this.activeWrites.add(messageId);
+    const before = this._snapshot(message);
+    document.dispatchEvent(new CustomEvent('responseLinter.messageWriteStarted', { detail: { messageId } }));
     try {
-      // 记录修改历史
-      this._recordModification(messageId, originalContent, newContent, strategy);
-
-      // 获取消息对象，允许索引/ID
-      const message = this._getMessage(messageId);
-      if (!message) {
-        throw new Error('无法获取消息对象');
+      this._restore(message, state);
+      const rendered = await this._updateMessageBlock(messageId, message);
+      if (!rendered.success) throw new Error(rendered.error || '消息显示更新失败');
+      const ctx = __getCtx();
+      if (this._getMessage(messageId) !== message || message.swipe_id !== state.swipeId) {
+        throw new Error('聊天或候选回复已切换');
       }
-
-      // 更新消息内容（渲染字段 + 数据字段）
-      if (message.extra) {
-        message.extra.display_text = newContent; // 用于 DOM 渲染
-      } else {
-        message.extra = { display_text: newContent };
-      }
-      // 同步更新真实消息文本，保证复制/保存/再验证一致
-      message.mes = newContent;
-
-      // 使用SillyTavern的updateMessageBlock更新DOM
-      const updateResult = await this._updateMessageBlock(messageId, message);
-
-      if (updateResult.success) {
-        // 成功后尝试轻量持久化（若可用）。不阻塞流程。
-        try { const ctx = __getCtx(); await ctx?.saveChat?.({ mesId: Number(messageId) }); } catch (e) { /* ignore */ }
-        console.log(`消息修改成功 [${messageId}] - 策略: ${strategy}`);
-
-        return {
-          success: true,
-          messageId,
-          originalContent,
-          newContent,
-          metadata: {
-            strategy,
-            timestamp: new Date(),
-            contentLengthChange: newContent.length - originalContent.length,
-            canUndo: true,
-          },
-        };
-      } else {
-        const err = updateResult.error || 'DOM更新失败';
-        throw new Error(err);
-      }
+      const save = ctx?.saveChat || ctx?.saveChatConditional;
+      if (typeof save !== 'function') throw new Error('聊天保存接口不可用');
+      await save.call(ctx);
+      return { success: true };
     } catch (error) {
-      console.error('执行消息修改失败:', error);
-
-      // 修改失败时清理历史记录
-      this._removeLastModification(messageId);
-
-      return {
-        success: false,
-        messageId,
-        originalContent,
-        newContent,
-        metadata: { reason: '修改执行失败', error: error.message },
-      };
+      this._restore(message, before);
+      await this._updateMessageBlock(messageId, message);
+      return { success: false, metadata: { reason: '消息修改或保存失败', error: error.message } };
+    } finally {
+      this.activeWrites.delete(messageId);
+      document.dispatchEvent(new CustomEvent('responseLinter.messageWriteFinished', {
+        detail: { messageId, content: message.extra?.display_text ?? message.mes ?? '' },
+      }));
     }
   }
 
@@ -192,19 +200,19 @@ export class MessageModifier {
       const ctx = __getCtx();
       // 1) 优先使用 getContext 暴露的安全入口（ST 官方推荐）
       if (ctx && typeof ctx.updateMessageBlock === 'function') {
-        ctx.updateMessageBlock(messageId, message, { rerenderMessage: true });
+        await ctx.updateMessageBlock(messageId, message, { rerenderMessage: true });
         return { success: true };
       }
 
       // 2) 回退到全局函数（某些构建会暴露到 window）
       if (typeof window.updateMessageBlock === 'function') {
-        window.updateMessageBlock(messageId, message, { rerenderMessage: true });
+        await window.updateMessageBlock(messageId, message, { rerenderMessage: true });
         return { success: true };
       }
 
       // 3) 最后回退：动态导入根级 script.js 的导出（本仓库存在该导出）
       const { updateMessageBlock } = await import('../../../../../script.js');
-      updateMessageBlock(messageId, message, { rerenderMessage: true });
+      await updateMessageBlock(messageId, message, { rerenderMessage: true });
       return { success: true };
     } catch (error) {
       console.error('调用updateMessageBlock失败:', error);
@@ -224,6 +232,8 @@ export class MessageModifier {
   async _handleConfirmationRequired(messageId, originalContent, newContent, strategy) {
     // 存储待确认的修改
     this.pendingModifications.set(messageId, {
+      message: this._getMessage(messageId),
+      swipeId: this._getMessage(messageId)?.swipe_id,
       originalContent,
       newContent,
       strategy,
@@ -249,6 +259,7 @@ export class MessageModifier {
    * @returns {Promise<ModificationResult>} 修改结果
    */
   async confirmModification(messageId, confirmed) {
+    messageId = String(messageId);
     const pendingModification = this.pendingModifications.get(messageId);
     if (!pendingModification) {
       return {
@@ -264,6 +275,11 @@ export class MessageModifier {
     this.pendingModifications.delete(messageId);
 
     if (confirmed) {
+      const current = this._getMessage(messageId);
+      if (!this.isEnabled || current !== pendingModification.message || current?.swipe_id !== pendingModification.swipeId ||
+          (current?.extra?.display_text ?? current?.mes ?? '') !== pendingModification.originalContent) {
+        return { success: false, metadata: { reason: '消息或启用状态已变化，请重新修复' } };
+      }
       // 执行修改
       return await this._executeModification(
         messageId,
@@ -290,72 +306,25 @@ export class MessageModifier {
    * @returns {Promise<ModificationResult>} 撤销结果
    */
   async undoModification(messageId, steps = 1) {
-    const history = this.modificationHistory.get(messageId);
-    if (!history || history.length === 0) {
-      return {
-        success: false,
-        messageId,
-        originalContent: '',
-        newContent: '',
-        metadata: { reason: '没有可撤销的修改' },
-      };
+    messageId = String(messageId);
+    const history = this.getModificationHistory(messageId);
+    if (!Number.isInteger(steps) || steps < 1 || !history.length) {
+      return { success: false, metadata: { reason: '没有可撤销的修改或撤销步数无效' } };
     }
-
-    try {
-      // 确定要撤销到的版本
-      const targetIndex = Math.max(0, history.length - steps);
-      const targetRecord = targetIndex === 0 ? null : history[targetIndex - 1];
-
-      // 获取当前消息
-      const message = this._getMessage(messageId);
-      if (!message) {
-        throw new Error('无法获取消息对象');
-      }
-
-      const currentContent = message.extra?.display_text || message.mes || '';
-      const targetContent = targetRecord ? targetRecord.modifiedContent : this._getOriginalContent(messageId);
-
-      // 更新消息内容
-      if (message.extra) {
-        message.extra.display_text = targetContent;
-      } else {
-        message.extra = { display_text: targetContent };
-      }
-
-      // 更新DOM
-      const updateResult = await this._updateMessageBlock(messageId, message);
-
-      if (updateResult.success) {
-        // 清理撤销的历史记录
-        this.modificationHistory.set(messageId, history.slice(0, targetIndex));
-
-        console.log(`消息撤销成功 [${messageId}] - 撤销 ${steps} 步`);
-
-        return {
-          success: true,
-          messageId,
-          originalContent: currentContent,
-          newContent: targetContent,
-          metadata: {
-            strategy: 'undo',
-            steps,
-            timestamp: new Date(),
-            canUndo: this.modificationHistory.get(messageId).length > 0,
-          },
-        };
-      } else {
-        throw new Error(updateResult.error || '撤销更新失败');
-      }
-    } catch (error) {
-      console.error('撤销修改失败:', error);
-      return {
-        success: false,
-        messageId,
-        originalContent: '',
-        newContent: '',
-        metadata: { reason: '撤销失败', error: error.message },
-      };
+    const message = this._getMessage(messageId);
+    const latest = history[history.length - 1];
+    const current = this._snapshot(message);
+    if (current.mes !== latest.after.mes || current.display !== latest.after.display || current.swipe !== latest.after.swipe) {
+      return { success: false, metadata: { reason: '消息已被编辑，请勿覆盖后续修改' } };
     }
+    const targetIndex = Math.max(0, history.length - steps);
+    const before = history[targetIndex].before;
+    const result = await this._writeState(messageId, message, before);
+    if (result.success) {
+      this.modificationHistory.set(messageId, history.slice(0, targetIndex));
+      this.pendingModifications.delete(messageId);
+    }
+    return { ...result, messageId, newContent: before.display ?? before.mes };
   }
 
   /**
@@ -411,7 +380,8 @@ export class MessageModifier {
    * @param {string} modifiedContent - 修改后内容
    * @param {string} strategy - 修改策略
    */
-  _recordModification(messageId, originalContent, modifiedContent, strategy) {
+  _recordModification(messageId, originalContent, modifiedContent, strategy, message, before, after) {
+    this.getModificationHistory(messageId);
     if (!this.modificationHistory.has(messageId)) {
       this.modificationHistory.set(messageId, []);
     }
@@ -420,7 +390,8 @@ export class MessageModifier {
 
     const record = {
       messageId,
-      originalContent: history.length === 0 ? originalContent : history[0].originalContent,
+      originalContent,
+      message, before, after,
       modifiedContent,
       strategy,
       timestamp: new Date(),
@@ -479,7 +450,14 @@ export class MessageModifier {
    * @returns {Array<ModificationRecord>} 修改历史
    */
   getModificationHistory(messageId) {
-    return this.modificationHistory.get(messageId) || [];
+    messageId = String(messageId);
+    const history = this.modificationHistory.get(messageId) || [];
+    const current = this._getMessage(messageId);
+    if (history.length && (history[0].message !== current || history[0].before.swipeId !== current?.swipe_id)) {
+      this.modificationHistory.delete(messageId);
+      return [];
+    }
+    return history;
   }
 
   /**
@@ -488,8 +466,7 @@ export class MessageModifier {
    * @returns {boolean} 是否可以撤销
    */
   canUndo(messageId) {
-    const history = this.modificationHistory.get(messageId);
-    return history && history.length > 0;
+    return this.getModificationHistory(messageId).length > 0;
   }
 
   /**
