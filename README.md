@@ -1,8 +1,10 @@
 # Response Linter
 
+基于 [il1umi/Response-Linter](https://github.com/il1umi/Response-Linter) 的个人维护分支。
+
 一个强大的 SillyTavern 扩展，用于实时监控和智能修复 AI 回复格式。
 
-![版本](https://img.shields.io/badge/版本-1.4.4-blue.svg)
+![版本](https://img.shields.io/badge/版本-1.4.5-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue.svg)
 ![SillyTavern](https://img.shields.io/badge/SillyTavern-兼容-brightgreen.svg)
 
@@ -46,7 +48,18 @@ Response-Linter/
 └── 📄 LICENSE                        # 许可证文件
 ```
 
-### 🆕 v1.4 更新摘要
+### 🆕 v1.4.5 修复更新
+
+- 修复手动修复的验证结果接口；关闭自动修复后仍可手动修复，并返回实际处理结果。
+- 禁用内容项保留在规则中，检测及位置修复时跳过；新增、编辑和取消操作使用独立草稿。
+- 接通撤销入口、历史查询及统计重置；撤销同步恢复原始文本、显示文本和当前候选回复，并保存聊天。
+- 修复失败时回滚内存状态；预览期间消息已编辑或聊天已切换时拒绝覆盖。
+- 重复内容使用不同匹配位置进行顺序校验，修复代码块模板误报。
+- 修复预览接口、修复次数统计及旧策略名称兼容；不再回退执行未选择的标签清理策略。
+
+规则内容仍按精确文字匹配，不提供完整 XML/HTML 语法解析。撤销历史仅保存在当前页面内存中，刷新后不可撤销。
+
+## 🆕 v1.4 更新摘要
 
 - 修复：稳定获取 getContext，解决 ReferenceError 导致的消息修改失败
 - 修复：消息修改会同步写入 message.mes，并在成功后触发轻量保存，刷新后仍然生效
@@ -68,7 +81,7 @@ Response-Linter/
 2.  **克隆仓库**
     使用 `git clone` 命令下载本仓库。
     ```bash
-    git clone https://github.com/il1umi/Response-Linter.git
+    git clone https://github.com/qiyuebuyuan1993/Response-Linter.git
     ```
 3.  **重启并启用**
     - 重启您的 SillyTavern 实例。
@@ -77,7 +90,7 @@ Response-Linter/
 #### 方法二：通过 URL 在线安装（酒馆内直装，推荐）
 
 这是一个更简单快捷的安装方式，直接在 SillyTavern 界面内完成。请复制以下 URL 地址：
-`https://github.com/il1umi/Response-Linter`
+`https://github.com/qiyuebuyuan1993/Response-Linter`
 
 ```mermaid
 graph TD
@@ -346,5 +359,5 @@ Copyright (C) 2025 il1umi
 
 ##  支持与反馈
 
-- **Issues**：[GitHub Issues](https://github.com/il1umi/Response-Linter/issues)
-- **讨论**：[GitHub Discussions](https://github.com/il1umi/Response-Linter/discussions)
+- **Issues**：[GitHub Issues](https://github.com/qiyuebuyuan1993/Response-Linter/issues)
+- **讨论**：[GitHub Discussions](https://github.com/qiyuebuyuan1993/Response-Linter/discussions)
