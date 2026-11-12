@@ -308,7 +308,7 @@ export class ValidationFunctionsUI {
    * 触发自动修复
    * @param {string} ruleName - 规则名称
    */
-  triggerAutoFix(ruleName) {
+  async triggerAutoFix(ruleName) {
     try {
       console.log('触发自动修复功能:', ruleName);
 
@@ -324,7 +324,12 @@ export class ValidationFunctionsUI {
       }
 
       // 调用后端控制器的自动修复功能
-      backendController.triggerAutoFix(ruleName);
+      const latest = backendController.getLatestAIMessage();
+      if (!latest) { window.toastr?.warning('没有找到AI消息', '响应检查器'); return; }
+      const result = await backendController.triggerManualFix(latest.id);
+      if (!result.success && !result.metadata?.requiresConfirmation) {
+        window.toastr?.warning(result.reason || '无法修复当前消息', '响应检查器');
+      }
     } catch (error) {
       console.error('触发自动修复失败:', error);
       if (window.toastr) {
@@ -340,16 +345,8 @@ export class ValidationFunctionsUI {
     try {
       const backendController = this.controller;
       if (!backendController) { window.toastr?.warning('系统未就绪', '响应检查器'); return; }
-      const latest = backendController.getLatestAIMessage?.();
-      if (!latest || !latest.content) { window.toastr?.warning('未找到可预览的AI消息', '响应检查器'); return; }
-
-      // 执行一次验证，获取缺失项与策略
-      const validationResult = backendController.validateContent?.(latest.content, latest.messageId);
-      if (!validationResult || validationResult.isValid) { window.toastr?.info('当前消息已通过验证', '响应检查器'); return; }
-
-      // 预览修复
-      const preview = window.autoFixEngine?.previewFix?.(latest.content, validationResult.missingContent, validationResult.fixStrategy || null);
-      if (!preview || !preview.success || preview.fixedContent === latest.content) { window.toastr?.info('没有可预览的修复', '响应检查器'); return; }
+      const preview = backendController.previewLatestFix();
+      if (!preview.success) { window.toastr?.info(preview.reason || '没有可预览的修复', '响应检查器'); return; }
 
       // 弹窗展示差异（简单并排展示，保持最小侵入）
       const html = $(`
@@ -358,11 +355,11 @@ export class ValidationFunctionsUI {
           <div class="grid-two">
             <div>
               <h4>原始内容</h4>
-              <pre style="max-height:300px;overflow:auto;white-space:pre-wrap;">${$('<div>').text(latest.content).html()}</pre>
+              <pre style="max-height:300px;overflow:auto;white-space:pre-wrap;">${$('<div>').text(preview.originalContent).html()}</pre>
             </div>
             <div>
               <h4>修复后内容</h4>
-              <pre style="max-height:300px;overflow:auto;white-space:pre-wrap;">${$('<div>').text(preview.fixedContent).html()}</pre>
+              <pre style="max-height:300px;overflow:auto;white-space:pre-wrap;">${$('<div>').text(preview.newContent).html()}</pre>
               <div style="margin-top:8px;">
                 <button class="menu_button small rl-copy-fixed">复制修复后内容</button>
               </div>
@@ -371,7 +368,7 @@ export class ValidationFunctionsUI {
         </div>
       `);
       html.on('click', '.rl-copy-fixed', () => {
-        try { navigator.clipboard?.writeText(preview.fixedContent); window.toastr?.success('已复制', '响应检查器'); } catch {}
+        try { navigator.clipboard?.writeText(preview.newContent); window.toastr?.success('已复制', '响应检查器'); } catch {}
       });
 
       const popup = (window.getContext && getContext().callGenericPopup) ? getContext().callGenericPopup : window.callGenericPopup;

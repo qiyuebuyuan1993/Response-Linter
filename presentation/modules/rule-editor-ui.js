@@ -8,6 +8,7 @@
 export class RuleEditorUI {
   constructor() {
     this.currentTags = [];
+    this.contentOptions = {};
     this.isInitialized = false;
     // 依赖注入（可选）：后端控制器与 UI 状态（放在构造器中，避免类字段使用 this 导致语法错误）
     this._controller = null;
@@ -53,6 +54,11 @@ export class RuleEditorUI {
   showAddModal() {
     try {
       this.currentTags = [];
+      this.contentOptions = {};
+      this.originalStrategy = null;
+      $('#rl-rule-strategy option[value="__existing_pipeline__"]').remove();
+      const state = this._uiState || window.UIState || window.ResponseLinter?.UIState;
+      if (state) state.currentEditingRule = null;
       $('#rl-editor-title').text('添加新规则');
       $('#rl-rule-form')[0].reset();
       $('#rl-rule-enabled').prop('checked', true);
@@ -79,11 +85,19 @@ export class RuleEditorUI {
 
       state.currentEditingRule = ruleId;
       this.currentTags = [...rule.requiredContent];
+      this.contentOptions = JSON.parse(JSON.stringify(rule.contentOptions || {}));
 
       $('#rl-editor-title').text('编辑规则');
       $('#rl-rule-name').val(rule.name);
       $('#rl-rule-description').val(rule.description || '');
-      $('#rl-rule-strategy').val(rule.fixStrategy || '');
+      this.originalStrategy = rule.fixStrategy;
+      $('#rl-rule-strategy option[value="__existing_pipeline__"]').remove();
+      if (Array.isArray(rule.fixStrategy)) {
+        $('#rl-rule-strategy').append($('<option>').val('__existing_pipeline__').text('保留现有组合修复动作'));
+      }
+      $('#rl-rule-strategy').val(Array.isArray(rule.fixStrategy) ? '__existing_pipeline__' : (rule.fixStrategy || ''));
+      $('#rl-fix-pattern').val(rule.customPattern || '');
+      $('#rl-fix-replacement').val(rule.customReplacement ?? '');
       $('#rl-rule-enabled').prop('checked', rule.enabled);
 
       // 设置位置感知修复选项
@@ -132,6 +146,7 @@ export class RuleEditorUI {
         state.currentEditingRule = null;
       }
       this.currentTags = [];
+      this.contentOptions = {};
     } catch (error) {
       console.error('隐藏模态框失败:', error);
     }
@@ -224,6 +239,8 @@ export class RuleEditorUI {
 
       // 绑定开关事件（直接传入对应的DOM元素，避免同名内容导致选择器命中多个项）
       const toggle = clone.querySelector('.rl-content-enabled');
+      toggle.checked = this.contentOptions[content]?.enabled !== false;
+      slider.classList.toggle('disabled', !toggle.checked);
       toggle.addEventListener('change', (e) => {
         this.toggleContentItem(slider, e.target.checked);
       });
@@ -235,13 +252,14 @@ export class RuleEditorUI {
         const state = this._uiState || window.UIState || window.ResponseLinter?.UIState;
         const ruleId = state?.currentEditingRule;
         const currentRule = ruleId ? state?.rules?.find(r => r.id === ruleId) : null;
-        const existing = currentRule?.contentOptions?.[content] || { actions: [] };
+        const existing = this.contentOptions[content] || { actions: [] };
         RuleEditorUI.renderChips(chipsBox, existing.actions);
 
         actionsBtn.addEventListener('click', async () => {
-          const picked = await RuleEditorUI.openActionsPopup(existing.actions, existing.pattern, existing.replacement);
+          const latest = this.contentOptions[content] || {};
+          const picked = await RuleEditorUI.openActionsPopup(latest.actions, latest.pattern, latest.replacement);
           if (!picked) return;
-          RuleEditorUI.setContentActions(content, picked.actions, picked.pattern, picked.replacement);
+          this.setContentActions(content, picked.actions, picked.pattern, picked.replacement);
           RuleEditorUI.renderChips(chipsBox, picked.actions);
           $('#rl-custom-strategy').toggle((picked.actions||[]).includes('custom'));
         });
@@ -299,14 +317,9 @@ export class RuleEditorUI {
 
       slider.toggleClass('disabled', !enabled);
 
-      // 记录当前规则的 contentOptions 状态（enabled）
-      const state = this._uiState || window.UIState || window.ResponseLinter?.UIState;
-      const ruleId = state?.currentEditingRule;
-      const currentRule = ruleId ? state?.rules?.find(r => r.id === ruleId) : null;
-      if (currentRule && contentKey) {
-        currentRule.contentOptions = currentRule.contentOptions || {};
-        const existing = currentRule.contentOptions[contentKey] || { actions: [] };
-        currentRule.contentOptions[contentKey] = { ...existing, enabled };
+      if (contentKey) {
+        const existing = this.contentOptions[contentKey] || { actions: [] };
+        this.contentOptions[contentKey] = { ...existing, enabled };
       }
 
       console.log(`内容项 "${contentKey}" ${enabled ? '已启用' : '已禁用'}`);
@@ -363,21 +376,13 @@ export class RuleEditorUI {
     } catch (e) { console.warn('openActionsPopup失败', e); return null; }
   }
 
-  static setContentActions(content, actions, pattern, replacement) {
-    try {
-      const state = this._uiState || window.UIState || window.ResponseLinter?.UIState;
-      const ruleId = state?.currentEditingRule;
-      const currentRule = ruleId ? state?.rules?.find(r => r.id === ruleId) : null;
-      if (!currentRule) return;
-      currentRule.contentOptions = currentRule.contentOptions || {};
-      const existing = currentRule.contentOptions[content] || { enabled: true, actions: [] };
-      currentRule.contentOptions[content] = {
-        ...existing,
-        actions,
-        ...(actions?.includes('custom') && pattern ? { pattern } : { pattern: undefined }),
-        ...(actions?.includes('custom') && replacement ? { replacement } : { replacement: undefined }),
-      };
-    } catch (e) { console.warn('设置动作失败', e); }
+  setContentActions(content, actions, pattern, replacement) {
+    const existing = this.contentOptions[content] || { enabled: true, actions: [] };
+    this.contentOptions[content] = {
+      ...existing, actions,
+      pattern: actions.includes('custom') ? pattern : undefined,
+      replacement: actions.includes('custom') ? replacement : undefined,
+    };
   }
 
 
@@ -663,7 +668,10 @@ export class RuleEditorUI {
         description: $('#rl-rule-description').val().trim(),
         enabled: $('#rl-rule-enabled').prop('checked'),
         requiredContent: this.currentTags,
-        fixStrategy: $('#rl-rule-strategy').val(),
+        fixStrategy: $('#rl-rule-strategy').val() === '__existing_pipeline__'
+          ? [...this.originalStrategy] : $('#rl-rule-strategy').val(),
+        customPattern: $('#rl-fix-pattern').val().trim(),
+        customReplacement: $('#rl-fix-replacement').val(),
         positionalOptions: {
           // 保存位置感知选项
           doubleNewline: $('#rl-insert-double-newline').prop('checked'),
@@ -678,7 +686,7 @@ export class RuleEditorUI {
         const row = document.querySelector(`.rl-content-item[data-content="${CSS.escape(tag)}"]`);
         const tooltip = row?.querySelector('.rl-custom-mini');
 
-        const existing = currentRule?.contentOptions?.[tag] || {};
+        const existing = this.contentOptions[tag] || {};
         const actions = Array.isArray(existing.actions) ? existing.actions : [];
         const enabled = existing.enabled !== false; // 默认启用
 

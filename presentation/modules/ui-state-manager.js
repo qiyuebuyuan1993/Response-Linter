@@ -171,7 +171,8 @@ export class UIStateManager {
 
       // 更新手动修复按钮状态
       const latestMessageId = this.getLatestAIMessageId();
-      $('#rl-manual-fix').prop('disabled', !latestMessageId || !this.isExtensionEnabled);
+      $('#rl-manual-fix').prop('disabled', latestMessageId === null || !this.isExtensionEnabled);
+      $('#rl-undo-fix').prop('disabled', latestMessageId === null || !window.backendController.canUndoFix(latestMessageId));
     } catch (error) {
       console.error('更新统计显示失败:', error);
     }
@@ -183,17 +184,8 @@ export class UIStateManager {
    */
   getLatestAIMessageId() {
     try {
-      // 使用jQuery查找最后一个AI消息
-      const aiMessages = $('#chat .mes').filter(function () {
-        return !$(this).hasClass('user_mes');
-      });
-
-      if (aiMessages.length > 0) {
-        const latestMessage = aiMessages.last();
-        return latestMessage.attr('mesid') || null;
-      }
-
-      return null;
+      const latest = window.backendController?.getLatestAIMessage();
+      return latest ? String(latest.id) : null;
     } catch (error) {
       console.error('获取最新AI消息ID失败:', error);
       return null;
