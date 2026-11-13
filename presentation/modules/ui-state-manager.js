@@ -65,7 +65,8 @@ export class UIStateManager {
       // 需要访问全局的backendController
       const backendStatus = window.backendController ? window.backendController.getStatus() : { isRunning: false };
       const settings = getCurrentExtensionSettings();
-      const hasStructureFeature = settings.removeLeakedReasoning === true || settings.repairSdcBoundary === true;
+      const hasStructureFeature = settings.removeLeakedReasoning === true ||
+        settings.repairSdcBoundary === true || settings.repairDetailsOrder === true;
 
       if (!this.isExtensionEnabled) {
         indicator.removeClass('active warning error').addClass('disabled');
@@ -96,7 +97,8 @@ export class UIStateManager {
       const hasRules = this.rules.length > 0;
       const isEnabled = this.isExtensionEnabled;
       const settings = getCurrentExtensionSettings();
-      const hasStructureFeature = settings.removeLeakedReasoning === true || settings.repairSdcBoundary === true;
+      const hasStructureFeature = settings.removeLeakedReasoning === true ||
+        settings.repairSdcBoundary === true || settings.repairDetailsOrder === true;
 
       // 如果扩展已启用但没有规则、也没有结构清理功能，且指引当前收起，则自动展开
       if (isEnabled && !hasRules && !hasStructureFeature && !this.isGuideExpanded) {

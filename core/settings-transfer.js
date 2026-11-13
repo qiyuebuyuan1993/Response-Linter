@@ -5,6 +5,7 @@ import {
   MAX_ADVANCE_MINUTES,
   parseCustomCalendarConfig,
 } from './calendar-engine.js';
+import { FEATURE_DEFAULTS, readFeatureSettings } from './feature-settings.js';
 
 export const STRUCTURE_SETTINGS_FORMAT = 'response-linter-structure-settings';
 export const STRUCTURE_SETTINGS_VERSION = 1;
@@ -50,6 +51,18 @@ function customTextFromPrevious(previousFeatures) {
   try { return JSON.stringify(value, null, 2); } catch { return ''; }
 }
 
+function keywordOf(value, fallback, label) {
+  if (value == null) return fallback;
+  if (typeof value !== 'string') throw new Error(`${label}必须是字符串`);
+  const text = value.trim();
+  if (!text) throw new Error(`${label}不能为空`);
+  return text;
+}
+
+function validateKeywordPair(monologue, choices) {
+  if (monologue === choices) throw new Error('“内心独白”与“你的选择是”标题关键词不能相同');
+}
+
 function hasAnyKey(object, keys) {
   return keys.some(key => Object.prototype.hasOwnProperty.call(object, key));
 }
@@ -66,11 +79,25 @@ export function createStructureSettingsExport(input = {}) {
   const source = sourceOf(input.sdcCalendarSource, 'gouhua');
   const custom = customOf(input.sdcCustomCalendarJson);
   if (source === 'custom' && !custom.calendar) throw new Error('选择自定义历法时必须提供有效 JSON');
+  const detailsMonologueKeyword = keywordOf(
+    input.detailsMonologueKeyword,
+    FEATURE_DEFAULTS.detailsMonologueKeyword,
+    '“内心独白”标题关键词',
+  );
+  const detailsChoicesKeyword = keywordOf(
+    input.detailsChoicesKeyword,
+    FEATURE_DEFAULTS.detailsChoicesKeyword,
+    '“你的选择是”标题关键词',
+  );
+  validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
   return {
     format: STRUCTURE_SETTINGS_FORMAT,
     version: STRUCTURE_SETTINGS_VERSION,
     removeLeakedReasoning: input.removeLeakedReasoning === true,
     repairSdcBoundary: input.repairSdcBoundary === true,
+    repairDetailsOrder: input.repairDetailsOrder === true,
+    detailsMonologueKeyword,
+    detailsChoicesKeyword,
     sdcCalendarSource: source,
     // 保留用户原始合法 JSON，不能把校验时补出的 advanceMinutes 等默认值写回去。
     sdcCustomCalendarJson: custom.text || '',
@@ -90,7 +117,9 @@ export function importStructureSettingsText(text, previous = {}) {
 
   try {
     const previousFeatures = previous && typeof previous === 'object' ? previous : {};
-    const previousAdvance = safePreviousAdvance(previousFeatures.sdcAdvanceMinutes);
+    // 旧设置/旧导出缺少新字段时按“关闭 + 默认标题关键词”处理，且不覆盖上次有效值。
+    const previousValid = readFeatureSettings(previousFeatures);
+    const previousAdvance = safePreviousAdvance(previousValid.sdcAdvanceMinutes);
 
     // 直接粘贴一份自定义历法 JSON（months 等）也应可用。
     if (hasAnyKey(parsed, CALENDAR_KEYS)) {
@@ -102,8 +131,11 @@ export function importStructureSettingsText(text, previous = {}) {
       return {
         ok: true,
         settings: {
-          removeLeakedReasoning: previousFeatures.removeLeakedReasoning === true,
-          repairSdcBoundary: previousFeatures.repairSdcBoundary === true,
+          removeLeakedReasoning: previousValid.removeLeakedReasoning,
+          repairSdcBoundary: previousValid.repairSdcBoundary,
+          repairDetailsOrder: previousValid.repairDetailsOrder,
+          detailsMonologueKeyword: previousValid.detailsMonologueKeyword,
+          detailsChoicesKeyword: previousValid.detailsChoicesKeyword,
           sdcCalendarSource: 'custom',
           sdcCustomCalendarJson: text.trim(),
           sdcAdvanceMinutes: directAdvance,
@@ -122,39 +154,64 @@ export function importStructureSettingsText(text, previous = {}) {
         return { ok: false, error: `不支持的配置版本：${String(parsed.version)}` };
       }
     }
-    if (!hasAnyKey(parsed, ['removeLeakedReasoning', 'repairSdcBoundary', 'sdcCalendarSource', 'sdcCustomCalendarJson', 'sdcAdvanceMinutes'])) {
-      return { ok: false, error: '配置为空或缺少可导入的结构清理/历法字段' };
+    if (!hasAnyKey(parsed, [
+      'removeLeakedReasoning', 'repairSdcBoundary', 'repairDetailsOrder',
+      'detailsMonologueKeyword', 'detailsChoicesKeyword',
+      'sdcCalendarSource', 'sdcCustomCalendarJson', 'sdcAdvanceMinutes',
+    ])) {
+      return { ok: false, error: '配置为空或缺少可导入的结构清理/历法/折叠块字段' };
     }
-    if (parsed.removeLeakedReasoning != null && typeof parsed.removeLeakedReasoning !== 'boolean') {
-      return { ok: false, error: 'removeLeakedReasoning 必须是布尔值' };
+    for (const key of ['removeLeakedReasoning', 'repairSdcBoundary', 'repairDetailsOrder']) {
+      if (parsed[key] != null && typeof parsed[key] !== 'boolean') {
+        return { ok: false, error: `${key} 必须是布尔值` };
+      }
     }
-    if (parsed.repairSdcBoundary != null && typeof parsed.repairSdcBoundary !== 'boolean') {
-      return { ok: false, error: 'repairSdcBoundary 必须是布尔值' };
+    for (const key of ['detailsMonologueKeyword', 'detailsChoicesKeyword']) {
+      if (parsed[key] != null && typeof parsed[key] !== 'string') {
+        return { ok: false, error: `${key} 必须是字符串` };
+      }
     }
 
     const source = parsed.sdcCalendarSource != null
       ? sourceOf(parsed.sdcCalendarSource)
-      : safePreviousSource(previousFeatures.sdcCalendarSource);
+      : safePreviousSource(previousValid.sdcCalendarSource);
     let custom;
     if (Object.prototype.hasOwnProperty.call(parsed, 'sdcCustomCalendarJson')) {
       custom = customOf(parsed.sdcCustomCalendarJson);
     } else if (source === 'custom') {
-      custom = customOf(previousFeatures.sdcCustomCalendarJson);
+      custom = customOf(previousValid.sdcCustomCalendarJson);
     } else {
-      custom = { text: customTextFromPrevious(previousFeatures), calendar: null };
+      custom = { text: customTextFromPrevious(previousValid), calendar: null };
     }
     if (source === 'custom' && !custom.calendar) throw new Error('选择自定义历法时必须提供有效 JSON');
     const advance = advanceOf(parsed.sdcAdvanceMinutes, previousAdvance, { strictType: true });
+
+    const detailsMonologueKeyword = keywordOf(
+      parsed.detailsMonologueKeyword,
+      previousValid.detailsMonologueKeyword,
+      '“内心独白”标题关键词',
+    );
+    const detailsChoicesKeyword = keywordOf(
+      parsed.detailsChoicesKeyword,
+      previousValid.detailsChoicesKeyword,
+      '“你的选择是”标题关键词',
+    );
+    validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
 
     return {
       ok: true,
       settings: {
         removeLeakedReasoning: typeof parsed.removeLeakedReasoning === 'boolean'
           ? parsed.removeLeakedReasoning
-          : previousFeatures.removeLeakedReasoning === true,
+          : previousValid.removeLeakedReasoning,
         repairSdcBoundary: typeof parsed.repairSdcBoundary === 'boolean'
           ? parsed.repairSdcBoundary
-          : previousFeatures.repairSdcBoundary === true,
+          : previousValid.repairSdcBoundary,
+        repairDetailsOrder: typeof parsed.repairDetailsOrder === 'boolean'
+          ? parsed.repairDetailsOrder
+          : previousValid.repairDetailsOrder,
+        detailsMonologueKeyword,
+        detailsChoicesKeyword,
         sdcCalendarSource: source,
         sdcCustomCalendarJson: custom.text,
         sdcAdvanceMinutes: advance,

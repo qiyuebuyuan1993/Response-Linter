@@ -12,7 +12,13 @@ import {
   DEFAULT_ADVANCE_MINUTES,
   MAX_ADVANCE_MINUTES,
 } from './calendar-engine.js';
-import { findMatchesOutsideRanges, findProtectedRanges, removeRanges } from './text-scan.js';
+import {
+  findHtmlCommentRanges,
+  findMatchesOutsideRanges,
+  findProtectedRanges,
+  mergeRanges,
+  removeRanges,
+} from './text-scan.js';
 
 const SDC_START_RE = /<!--\s*SDC-start\b([\s\S]*?)-->/gi;
 const SDC_END_RE = /<!--\s*SDC-end\b([\s\S]*?)-->/gi;
@@ -138,10 +144,13 @@ export function repairSdcContent(content, options = {}) {
   if (!source) return resultBase;
 
   const ranges = findProtectedRanges(source);
+  // 结构化标签/辅助边界要忽略 HTML 注释中的示例；但 SDC-start/end 本身也是注释，
+  // 必须继续只按代码保护区域扫描，不能被注释排除规则隐藏。
+  const structuralRanges = mergeRanges([...ranges, ...findHtmlCommentRanges(source)]);
   const starts = findMatchesOutsideRanges(source, SDC_START_RE, ranges);
   const ends = findMatchesOutsideRanges(source, SDC_END_RE, ranges);
-  const contentStarts = findMatchesOutsideRanges(source, CONTENT_START_RE, ranges);
-  const contentEnds = findMatchesOutsideRanges(source, CONTENT_END_RE, ranges);
+  const contentStarts = findMatchesOutsideRanges(source, CONTENT_START_RE, structuralRanges);
+  const contentEnds = findMatchesOutsideRanges(source, CONTENT_END_RE, structuralRanges);
 
   if (!starts.length && !ends.length) {
     // 普通回复：没有 SDC 标记时完全不介入。
@@ -186,7 +195,7 @@ export function repairSdcContent(content, options = {}) {
   }
 
   const bodyStart = start.index + start[0].length;
-  const boundary = findBoundary(source, bodyStart, ranges);
+  const boundary = findBoundary(source, bodyStart, structuralRanges);
   const regionEnd = boundary ? boundary.index : source.length;
   const endInside = end && end.index >= bodyStart && end.index <= regionEnd;
   const closeInside = close && close.index >= bodyStart && close.index <= regionEnd;

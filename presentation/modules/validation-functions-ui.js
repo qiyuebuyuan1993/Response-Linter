@@ -1,5 +1,6 @@
 // Response Linter 验证功能UI模块
 // 重构自index.js中的ValidationFunctions对象，保持完全向后兼容
+import { escapeHtmlText } from '../../core/text-safety.js';
 
 /**
  * 验证功能UI类
@@ -328,7 +329,7 @@ export class ValidationFunctionsUI {
       if (!latest) { window.toastr?.warning('没有找到AI消息', '响应检查器'); return; }
       const result = await backendController.triggerManualFix(latest.id);
       if (!result.success && !result.metadata?.requiresConfirmation) {
-        window.toastr?.warning(result.reason || '无法修复当前消息', '响应检查器');
+        window.toastr?.warning(escapeHtmlText(result.reason || '无法修复当前消息'), '响应检查器', { escapeHtml: false });
       }
     } catch (error) {
       console.error('触发自动修复失败:', error);
@@ -346,7 +347,7 @@ export class ValidationFunctionsUI {
       const backendController = this.controller;
       if (!backendController) { window.toastr?.warning('系统未就绪', '响应检查器'); return; }
       const preview = backendController.previewLatestFix();
-      if (!preview.success) { window.toastr?.info(preview.reason || '没有可预览的修复', '响应检查器'); return; }
+      if (!preview.success) { window.toastr?.info(escapeHtmlText(preview.reason || '没有可预览的修复'), '响应检查器', { escapeHtml: false }); return; }
 
       // 弹窗展示差异（简单并排展示，保持最小侵入）
       const html = $(`
