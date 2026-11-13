@@ -1,16 +1,25 @@
 // Response Linter 扩展 - 主入口文件
 // UI层实现与真实后端功能集成
+import { getFreshContext } from './core/host-context.js';
+import {
+  DEFAULT_ADVANCE_MINUTES,
+  describeCalendar,
+  resolveCalendarSource,
+} from './core/calendar-engine.js';
+import {
+  createStructureSettingsExport,
+  importStructureSettingsText,
+} from './core/settings-transfer.js';
+import {
+  FEATURE_DEFAULTS,
+  mergeFeatureSettings,
+  readFeatureSettings,
+  seedCustomCalendarDraft,
+} from './core/feature-settings.js';
 
-// 统一通过 getContext() 与酒馆交互，避免直接导入内部文件
-// 注意：以下常量通过运行时从 getContext() 获取，保证低耦合
-const __getCtx = () => {
-  try {
-    if (typeof getContext === 'function') return getContext();
-    if (window?.SillyTavern?.getContext) return window.SillyTavern.getContext();
-    if (window?.getContext) return window.getContext();
-  } catch {}
-  return null;
-};
+// 统一通过 getContext() 与酒馆交互，避免直接导入内部文件。
+// 优先实际宿主 window.SillyTavern.getContext，每次现取。
+const __getCtx = () => getFreshContext();
 const __ST = (() => {
   const ctx = __getCtx() || {};
   return {
@@ -162,6 +171,12 @@ const defaultSettings = {
   enabled: false,
   autoFix: false,
   defaultAutoFixAction: 'apply', // 'preview' | 'apply'
+  // 两个结构清理开关默认关闭，不影响老用户既有规则与行为。
+  removeLeakedReasoning: false,
+  repairSdcBoundary: false,
+  sdcCalendarSource: 'gouhua',
+  sdcCustomCalendarJson: '',
+  sdcAdvanceMinutes: DEFAULT_ADVANCE_MINUTES,
   rules: [
     {
       id: 'thinking-content-demo',
@@ -216,24 +231,30 @@ const defaultSettings = {
  * @param {string} newContent - 修复后内容
  * @param {string} strategy - 修复策略
  */
-async function showFixConfirmationDialog(messageId, originalContent, newContent, strategy) {
+async function showFixConfirmationDialog(messageId, originalContent, newContent, strategy, warnings = []) {
   const strategyNames = {
     'thinking-content': '思维链格式修复',
     'add-missing-tags': '添加缺失标签',
     custom: '自定义修复',
+    'remove-leaked-reasoning': '清理泄漏推理',
+    'sdc-content-boundary': '修复 SDC/正文边界',
   };
 
-  const strategyName = strategyNames[strategy] || strategy;
+  const strategyName = (strategyNames[strategy] || strategy || '').split(' | ').map(name => strategyNames[name] || name).join(' + ');
   // 预览展示策略：默认全量；超过阈值时使用 <details> 折叠以保护性能
   const LONG_PREVIEW_THRESHOLD = 1000; // 1000 字符保护阈值（约等于 1000 个中文汉字）
   const isLongPreview = (newContent || '').length > LONG_PREVIEW_THRESHOLD;
   const preview = newContent;
+  const warningHtml = Array.isArray(warnings) && warnings.length
+    ? `<div class="rl-confirmation-warnings"><strong>注意：</strong><ul>${warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`
+    : '';
 
   const dialogContent = `
     <div class="rl-fix-confirmation-dialog">
       <h3>确认自动修复</h3>
       <p><strong>修复策略</strong>: ${strategyName}</p>
       <p><strong>消息ID</strong>: ${messageId}</p>
+      ${warningHtml}
 
       <div class="rl-content-preview">
         <h4>修复后内容预览：</h4>
@@ -374,6 +395,45 @@ function escapeHtml(text) {
 // ConfigWizard对象的所有孤立方法已移除
 // 所有功能已完整迁移到ConfigWizardUI模块中
 
+// ===== 结构清理 / SDC 历法设置 =====
+const getFeatureSettings = readFeatureSettings;
+
+function customJsonForTextarea(value) {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') {
+    try { return JSON.stringify(value, null, 2); } catch { return ''; }
+  }
+  return '';
+}
+
+function updateCalendarCustomVisibility() {
+  const source = $('#rl-sdc-calendar-source').val();
+  $('#rl-sdc-custom-panel').toggle(source === 'custom');
+}
+
+function setCalendarStatus(text, isError = false) {
+  const element = $('#rl-sdc-calendar-status-text');
+  element.text(text || '');
+  element.toggleClass('rl-calendar-error', !!isError);
+}
+
+function refreshCalendarStatus() {
+  try {
+    const source = $('#rl-sdc-calendar-source').val() || FEATURE_DEFAULTS.sdcCalendarSource;
+    const customJson = $('#rl-sdc-custom-calendar').val() || '';
+    const result = resolveCalendarSource({ source, customJson, ctx: __getCtx() });
+    if (result.ok) {
+      setCalendarStatus(`${result.sourceLabel}：${describeCalendar(result.calendar)}`, false);
+    } else {
+      setCalendarStatus(`${result.sourceLabel || source}：${result.error}`, true);
+    }
+    return result;
+  } catch (error) {
+    setCalendarStatus(`历法检测失败：${error.message}`, true);
+    return { ok: false, error: error.message };
+  }
+}
+
 // 设置管理
 async function loadSettings() {
   // 延迟初始化：此处不写入默认值，避免在宿主尚未把持久化设置加载完成前覆盖用户数据
@@ -426,6 +486,24 @@ async function loadSettings() {
   $('#rl-notification-duration').val(settings.notifications.duration);
   $('#rl-duration-display').text(settings.notifications.duration + '秒');
   $('#rl-show-success').prop('checked', settings.notifications.showSuccess);
+
+  // 结构清理与历法设置（缺失字段按默认关闭，不重置旧规则）
+  const features = getFeatureSettings(settings);
+  $('#rl-remove-leaked-reasoning').prop('checked', features.removeLeakedReasoning);
+  $('#rl-repair-sdc-boundary').prop('checked', features.repairSdcBoundary);
+  $('#rl-sdc-calendar-source').val(features.sdcCalendarSource);
+  $('#rl-sdc-custom-calendar').val(customJsonForTextarea(features.sdcCustomCalendarJson));
+  if (features.sdcCalendarSource === 'custom') {
+    const seeded = seedCustomCalendarDraft($('#rl-sdc-custom-calendar').val(), features.sdcCustomCalendarJson);
+    if (seeded.seeded) {
+      $('#rl-sdc-custom-calendar').val(seeded.text);
+      // 仅为当前会话/后续保存提供有效草稿；不在此处主动落盘。
+      settings.sdcCustomCalendarJson = seeded.text.trim();
+    }
+  }
+  $('#rl-sdc-advance-minutes').val(features.sdcAdvanceMinutes);
+  updateCalendarCustomVisibility();
+  try { refreshCalendarStatus(); } catch {}
 
   // 渲染规则并更新状态
   if (window.RulesManager?.renderRulesList) window.RulesManager.renderRulesList();
@@ -486,6 +564,24 @@ function saveSettings() {
   settings.notifications.showSuccess = $('#rl-show-success').prop('checked');
   settings.rules = Array.isArray(UIState.rules) ? UIState.rules : (settings.rules || []);
 
+  // 结构清理开关与历法配置：独立保存；非法 JSON/参数不覆盖上一次有效配置。
+  const merged = mergeFeatureSettings(settings, {
+    removeLeakedReasoning: $('#rl-remove-leaked-reasoning').prop('checked') === true,
+    repairSdcBoundary: $('#rl-repair-sdc-boundary').prop('checked') === true,
+    sdcCalendarSource: $('#rl-sdc-calendar-source').val() || FEATURE_DEFAULTS.sdcCalendarSource,
+    sdcCustomCalendarJson: $('#rl-sdc-custom-calendar').val() || '',
+    sdcAdvanceMinutes: $('#rl-sdc-advance-minutes').val(),
+  });
+  Object.assign(settings, merged.fields);
+  $('#rl-sdc-calendar-source').val(settings.sdcCalendarSource);
+  $('#rl-sdc-advance-minutes').val(settings.sdcAdvanceMinutes);
+  updateCalendarCustomVisibility();
+  for (const warning of merged.warnings) {
+    if (window.toastr) window.toastr.warning(warning, '响应检查器', { timeOut: 6000 });
+  }
+
+  try { refreshCalendarStatus(); } catch {}
+
   // 同步更新后端设置（后端可能尚未就绪）
   try {
     if (!backendController) throw new Error('backendController未就绪');
@@ -497,6 +593,9 @@ function saveSettings() {
 
   // 镜像到 window.extension_settings，避免界面其它地方读取旧引用
   try { if (window.extension_settings) window.extension_settings[extensionName] = settings; } catch (e) {}
+
+  // 设置保存后立即刷新手动修复/撤销按钮；按钮状态从当前 getContext() 重新读取。
+  try { UIState.updateStatistics(); UIState.updateStatusIndicator(); } catch (e) {}
 
   // 额外：写入 accountStorage 备份，保证跨版本/覆盖安全
   try {
@@ -534,9 +633,9 @@ function setupBackendEventHandlers() {
 
   // 监听修复确认请求事件
   document.addEventListener('responseLinter.confirmationRequired', event => {
-    const { messageId, originalContent, newContent, strategy, dialogContent } = event.detail;
+    const { messageId, originalContent, newContent, strategy, warnings, dialogContent } = event.detail;
     // 异步调用修复确认对话框（不需要等待）
-    showFixConfirmationDialog(messageId, originalContent, newContent, strategy);
+    showFixConfirmationDialog(messageId, originalContent, newContent, strategy, warnings);
   });
 
   document.addEventListener('responseLinter.fixStatisticsChanged', () => UIState.updateStatistics());
@@ -544,13 +643,24 @@ function setupBackendEventHandlers() {
   // 监听修复应用成功事件
   document.addEventListener('responseLinter.fixApplied', event => {
     const { task, fixResult } = event.detail;
+    const warnings = task?.warnings || fixResult?.metadata?.warnings || [];
+    if (warnings.length) toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
     toastr.success(`修复成功应用 - ${task.fixStrategy}`, '响应检查器');
     UIState.updateStatistics();
   });
 
+  // 结构清理警告（例如未闭合推理块无法安全删除）
+  document.addEventListener('responseLinter.fixWarning', event => {
+    const warnings = event.detail?.warnings || [];
+    if (warnings.length) toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+  });
+
   // 监听修复确认事件
   document.addEventListener('responseLinter.fixConfirmed', event => {
-    const { messageId } = event.detail;
+    const { messageId, warnings } = event.detail;
+    if (Array.isArray(warnings) && warnings.length) {
+      toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+    }
     toastr.success('修复已确认应用', '响应检查器');
     UIState.updateStatistics();
   });
@@ -600,6 +710,7 @@ function setupEventHandlers() {
     UIState.isExtensionEnabled = $(this).prop('checked');
     UIState.updateStatusIndicator();
     saveSettings();
+    UIState.updateStatistics();
 
     const status = UIState.isExtensionEnabled ? '已启用' : '已禁用';
     toastr.info(`响应检查器${status}`, '响应检查器');
@@ -621,6 +732,109 @@ function setupEventHandlers() {
   $('#rl-default-auto-fix-action').on('change', saveSettings);
 
   $('#rl-show-success').on('change', saveSettings);
+
+  // ===== 结构清理 / SDC 历法控件 =====
+  $('#rl-remove-leaked-reasoning').on('change', function () {
+    saveSettings();
+    if (window.toastr) {
+      window.toastr.info($(this).prop('checked') ? '已启用泄漏推理清理（仅删除完整或边界明确的推理块）' : '已关闭泄漏推理清理', '响应检查器', { timeOut: 3000 });
+    }
+  });
+
+  $('#rl-repair-sdc-boundary').on('change', function () {
+    saveSettings();
+    if (window.toastr) {
+      window.toastr.info($(this).prop('checked') ? '已启用 SDC/正文边界修复（使用下方历法来源）' : '已关闭 SDC/正文边界修复', '响应检查器', { timeOut: 3000 });
+    }
+  });
+
+  $('#rl-sdc-calendar-source').on('change', function () {
+    if ($(this).val() === 'custom') {
+      const saved = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
+      const seeded = seedCustomCalendarDraft($('#rl-sdc-custom-calendar').val(), saved.sdcCustomCalendarJson);
+      if (seeded.text !== $('#rl-sdc-custom-calendar').val()) $('#rl-sdc-custom-calendar').val(seeded.text);
+    }
+    updateCalendarCustomVisibility();
+    saveSettings();
+  });
+
+  $('#rl-sdc-advance-minutes').on('change', saveSettings);
+
+  $('#rl-sdc-custom-calendar').on('change', function () {
+    if ($('#rl-sdc-calendar-source').val() === 'custom') saveSettings();
+  });
+
+  $('#rl-sdc-calendar-check').on('click', function () {
+    const result = refreshCalendarStatus();
+    if (!window.toastr) return;
+    if (result.ok) window.toastr.success(`历法可用：${result.sourceLabel}`, '响应检查器', { timeOut: 3000 });
+    else window.toastr.warning(`历法不可用：${result.error}`, '响应检查器', { timeOut: 6000 });
+  });
+
+  $('#rl-sdc-export-config').on('click', function () {
+    try {
+      const settings = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
+      const exportSource = $('#rl-sdc-calendar-source').val() || settings.sdcCalendarSource;
+      const localCustomText = $('#rl-sdc-custom-calendar').val() || settings.sdcCustomCalendarJson;
+      const payload = createStructureSettingsExport({
+        removeLeakedReasoning: $('#rl-remove-leaked-reasoning').prop('checked') === true,
+        repairSdcBoundary: $('#rl-repair-sdc-boundary').prop('checked') === true,
+        sdcCalendarSource: exportSource,
+        sdcCustomCalendarJson: localCustomText,
+        sdcAdvanceMinutes: Number($('#rl-sdc-advance-minutes').val()) || DEFAULT_ADVANCE_MINUTES,
+      });
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'response-linter-structure-settings.json';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      window.toastr?.success('结构清理/历法配置已导出', '响应检查器');
+    } catch (error) {
+      console.error('导出结构清理配置失败:', error);
+      window.toastr?.error('导出配置失败', '响应检查器');
+    }
+  });
+
+  $('#rl-sdc-import-config').on('click', function () {
+    try {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.onchange = event => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const current = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
+            const imported = importStructureSettingsText(e.target.result, current);
+            if (!imported.ok) throw new Error(imported.error);
+            const next = imported.settings;
+            $('#rl-sdc-custom-calendar').val(customJsonForTextarea(next.sdcCustomCalendarJson));
+            $('#rl-sdc-calendar-source').val(next.sdcCalendarSource);
+            $('#rl-remove-leaked-reasoning').prop('checked', next.removeLeakedReasoning);
+            $('#rl-repair-sdc-boundary').prop('checked', next.repairSdcBoundary);
+            $('#rl-sdc-advance-minutes').val(next.sdcAdvanceMinutes);
+            updateCalendarCustomVisibility();
+            saveSettings();
+            window.toastr?.success('结构清理/历法配置已导入并保存', '响应检查器');
+          } catch (error) {
+            console.error('导入结构清理配置失败:', error);
+            window.toastr?.error(`导入失败：${error.message}`, '响应检查器', { timeOut: 6000 });
+          }
+        };
+        reader.readAsText(file);
+      };
+      input.click();
+    } catch (error) {
+      console.error('导入结构清理配置失败:', error);
+      window.toastr?.error('导入配置失败', '响应检查器');
+    }
+  });
 
   // 安全加载 ConfigWizard（若尚未初始化，进行懒加载）
   async function ensureConfigWizard() {
@@ -767,6 +981,9 @@ function setupEventHandlers() {
         UIState.updateStatistics();
       } else if (!result.metadata?.requiresConfirmation) {
         toastr.error(result.reason || '修复失败', '响应检查器');
+      }
+      if (Array.isArray(result.warnings) && result.warnings.length) {
+        toastr.warning(result.warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
       }
     } catch (error) {
       console.error('手动修复失败:', error);
@@ -1049,6 +1266,12 @@ jQuery(async () => {
             console.info('[Response Linter] SETTINGS_LOADED (fallback)');
             ensureNamespaceThenLoad();
           });
+          // 聊天切换后手动修复/撤销按钮需要立即反映新聊天的最新消息。
+          if (et.CHAT_CHANGED && typeof es.on === 'function') {
+            es.on(et.CHAT_CHANGED, () => {
+              try { UIState.updateStatistics(); UIState.updateStatusIndicator(); } catch (e) {}
+            });
+          }
           listenersBound = true;
           return true;
         }
