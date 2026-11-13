@@ -1,21 +1,11 @@
 // Response Linter 消息处理器模块
-import { getContext as ST_getContext } from '../../../../st-context.js';
+import { getFreshContext, isStreamingContext } from './host-context.js';
 
 // 负责监听SillyTavern事件、提取消息内容和协调验证流程
 
-// 统一通过 getContext() 与事件系统交互，避免直接导入内部文件
-// 使用安全的上下文获取：优先 SillyTavern.getContext()，再到全局 getContext/window.getContext
+// 使用安全的上下文获取：优先 window.SillyTavern.getContext（实际宿主）→ 全局 getContext。
 function safeGetContext() {
-  try {
-    if (window?.SillyTavern?.getContext) return window.SillyTavern.getContext();
-  } catch {}
-  try {
-    if (typeof getContext === 'function') return getContext();
-  } catch {}
-  try {
-    if (typeof window !== 'undefined' && typeof window.getContext === 'function') return window.getContext();
-  } catch {}
-  return null;
+  return getFreshContext();
 }
 
 
@@ -295,6 +285,11 @@ export class MessageHandler {
       return true; // 非AI消息视为成功处理
     }
 
+    // 流式生成期间不更新去重基线，也不触发验证/修复；等最终渲染事件再处理。
+    if (isStreamingContext(safeGetContext())) {
+      return true;
+    }
+
     // 内容去重：仅当内容发生变化时才继续后续流程
     const prev = this.lastContent.get(messageId);
     const changed = prev !== messageData.content;
@@ -389,7 +384,7 @@ export class MessageHandler {
         if (!message.is_user && !message.is_system) {
           const content = message.extra?.display_text || message.mes || '';
           return {
-            id: i.toString(),
+            id: String(message.id ?? i),
             content: content.trim(),
             name: message.name || 'AI',
             timestamp: message.send_date || new Date().toISOString(),
