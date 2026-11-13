@@ -2,6 +2,7 @@
 // 协调验证失败事件和修复执行，管理修复流程和用户交互
 
 import { autoFixEngine } from './auto-fix-engine.js';
+import { getFreshContext, isStreamingContext } from './host-context.js';
 import { messageModifier } from './message-modifier.js';
 import { validationEngine } from './validation-engine.js';
 
@@ -104,6 +105,12 @@ export class FixCoordinator {
     try {
       const { result, messageData } = eventData;
 
+      // 后端已经为同一条消息排队了合并后的修复计划（结构清理+普通规则），
+      // 这里不能再入队一次，避免双重写入或竞态。
+      if (result?.metadata?.handledByRepairPlan) {
+        return;
+      }
+
       // 检查是否有可用的修复策略
       if (!result.fixStrategy) {
         console.log('验证失败但没有可用的修复策略:', result.ruleName);
@@ -152,10 +159,10 @@ export class FixCoordinator {
    * @param {Object} eventData - 确认请求事件数据
    */
   _handleModificationConfirmationRequired(eventData) {
-    const { messageId, originalContent, newContent, strategy } = eventData;
+    const { messageId, originalContent, newContent, strategy, warnings } = eventData;
 
     // 触发UI确认对话框
-    this._showConfirmationDialog(messageId, originalContent, newContent, strategy);
+    this._showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings);
   }
 
   /**
@@ -164,8 +171,12 @@ export class FixCoordinator {
    * @param {FixTask} task - 修复任务
    */
   _addToQueue(task) {
-    task.message = messageModifier._getMessage(task.messageId);
-    task.swipeId = task.message?.swipe_id;
+    // 计划任务已经携带生成时的消息对象与 swipe 身份；不能在这里重新取最新消息，
+    // 否则预览/队列期间切换候选回复会被悄悄替换。旧任务才按当前上下文补身份。
+    if (!task.message) task.message = messageModifier._getMessage(task.messageId);
+    if (task.swipeId === undefined) {
+      task.swipeId = Number.isInteger(task.message?.swipe_id) ? task.message.swipe_id : null;
+    }
     // 检查队列大小
     if (this.fixQueue.length >= this.maxQueueSize) {
       console.warn('修复队列已满，丢弃最旧的任务');
@@ -227,7 +238,12 @@ export class FixCoordinator {
   async _processFixTask(task) {
     try {
       if (!this.isEnabled) return { success: false, reason: '扩展未启用' };
-      if (messageModifier._getMessage(task.messageId) !== task.message || task.message?.swipe_id !== task.swipeId) {
+      if (isStreamingContext(getFreshContext())) {
+        return { success: false, reason: '当前回复仍在流式生成中，已跳过修复，请等待生成完成。' };
+      }
+      const currentMessage = messageModifier._getMessage(task.messageId);
+      const currentSwipeId = Number.isInteger(currentMessage?.swipe_id) ? currentMessage.swipe_id : null;
+      if (currentMessage !== task.message || currentSwipeId !== task.swipeId) {
         return { success: false, reason: '聊天或候选回复已切换，请重新修复' };
       }
       task.status = 'processing';
@@ -235,19 +251,36 @@ export class FixCoordinator {
 
       console.log(`开始处理修复任务 [${task.messageId}] - 策略: ${task.fixStrategy}`);
 
-      // 尝试自动修复
-      // 将当前任务对应的规则顺序暴露给修复引擎（用于查找下一个/上一个标签）
-      try {
-        const rule = validationEngine.activeRules.find(r => r.id === task.ruleId) || null;
-        window.ResponseLinter = window.ResponseLinter || {};
-        window.ResponseLinter.CurrentRule = rule || null;
-      } catch (e) {}
+      let fixResult;
+      if (typeof task.plannedContent === 'string') {
+        // 手动/自动/预览共用的计划：普通规则与结构清理已经合并，避免二次调用策略。
+        fixResult = {
+          success: task.plannedContent !== task.content,
+          originalContent: task.content,
+          fixedContent: task.plannedContent,
+          strategy: task.fixStrategy,
+          fixedItems: [],
+          metadata: {
+            pipeline: Array.isArray(task.strategies) ? task.strategies : [],
+            warnings: Array.isArray(task.warnings) ? task.warnings : [],
+            planned: true,
+            reason: task.plannedContent === task.content ? '内容无变化' : undefined,
+          },
+        };
+      } else {
+        // 兼容旧队列任务（例如直接调用 triggerManualFix 的旧路径）。
+        try {
+          const rule = validationEngine.activeRules.find(r => r.id === task.ruleId) || null;
+          window.ResponseLinter = window.ResponseLinter || {};
+          window.ResponseLinter.CurrentRule = rule || null;
+        } catch (e) {}
 
-      const fixResult = autoFixEngine.attemptFix(task.content, task.missingItems, task.fixStrategy);
-      const rule = validationEngine.activeRules.find(r => r.id === task.ruleId);
-      if (fixResult.success && rule && !validationEngine._validateSingleRule(fixResult.fixedContent, rule, task.messageId).isValid) {
-        fixResult.success = false;
-        fixResult.metadata = { reason: '修复后仍不满足当前规则，未修改消息' };
+        fixResult = autoFixEngine.attemptFix(task.content, task.missingItems, task.fixStrategy);
+        const rule = validationEngine.activeRules.find(r => r.id === task.ruleId);
+        if (fixResult.success && rule && !validationEngine._validateSingleRule(fixResult.fixedContent, rule, task.messageId).isValid) {
+          fixResult.success = false;
+          fixResult.metadata = { reason: '修复后仍不满足当前规则，未修改消息' };
+        }
       }
 
       if (fixResult.success) {
@@ -258,6 +291,7 @@ export class FixCoordinator {
           task.fixStrategy,
           this.requireConfirmation,
           task.content,
+          { warnings: fixResult.metadata?.warnings || task.warnings || [] },
         );
 
         if (modificationResult.success) {
@@ -285,7 +319,11 @@ export class FixCoordinator {
           this.statistics.failedFixes++;
           console.error(`修复任务失败 - 消息修改失败 [${task.messageId}]`, modificationResult);
         }
-        return { ...modificationResult, reason: modificationResult.metadata?.reason };
+        return {
+          ...modificationResult,
+          reason: modificationResult.metadata?.reason,
+          warnings: fixResult.metadata?.warnings || task.warnings || [],
+        };
       } else {
         task.status = 'failed';
         this.statistics.failedFixes++;
@@ -335,9 +373,9 @@ export class FixCoordinator {
    * @param {string} newContent - 新内容
    * @param {string} strategy - 修复策略
    */
-  _showConfirmationDialog(messageId, originalContent, newContent, strategy) {
+  _showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings = []) {
     // 创建确认对话框内容
-    const dialogContent = this._createConfirmationDialog(messageId, originalContent, newContent, strategy);
+    const dialogContent = this._createConfirmationDialog(messageId, originalContent, newContent, strategy, warnings);
 
     // 触发UI显示事件
     this._dispatchFixEvent('confirmationRequired', {
@@ -345,6 +383,7 @@ export class FixCoordinator {
       originalContent,
       newContent,
       strategy,
+      warnings,
       dialogContent,
     });
   }
@@ -358,20 +397,26 @@ export class FixCoordinator {
    * @param {string} strategy - 修复策略
    * @returns {string} 对话框HTML内容
    */
-  _createConfirmationDialog(messageId, originalContent, newContent, strategy) {
+  _createConfirmationDialog(messageId, originalContent, newContent, strategy, warnings = []) {
     const strategyNames = {
       'thinking-content': '思维链格式修复',
       'add-missing-tags': '添加缺失标签',
       custom: '自定义修复',
+      'remove-leaked-reasoning': '清理泄漏推理',
+      'sdc-content-boundary': '修复 SDC/正文边界',
     };
 
     const strategyName = strategyNames[strategy] || strategy;
+    const warningHtml = warnings.length
+      ? `<div class="rl-confirmation-warnings"><h4>注意：</h4><ul>${warnings.map(item => `<li>${this._escapeHtml(item)}</li>`).join('')}</ul></div>`
+      : '';
 
     return `
             <div class="rl-fix-confirmation">
                 <h3>确认自动修复</h3>
                 <p><strong>修复策略</strong>: ${strategyName}</p>
                 <p><strong>消息ID</strong>: ${messageId}</p>
+                ${warningHtml}
                 
                 <div class="rl-content-comparison">
                     <div class="rl-original">
@@ -420,7 +465,7 @@ export class FixCoordinator {
 
     if (confirmed && result.success) {
       this.statistics.successfulFixes++;
-      this._dispatchFixEvent('fixConfirmed', { messageId, result });
+      this._dispatchFixEvent('fixConfirmed', { messageId, warnings: result.warnings || [], result });
     } else if (!confirmed && result.metadata?.reason === '用户取消修改') {
       this.statistics.userCancellations++;
       this._dispatchFixEvent('fixCancelled', { messageId });
@@ -462,6 +507,39 @@ export class FixCoordinator {
     }));
   }
 
+  /**
+   * 入队由 repair-service 生成好的完整计划（手动/自动/预览共用）。
+   * 计划携带消息对象与 swipe 身份，队列执行时会再次核对。
+   * @param {Object} plan
+   * @param {{resolve?:Function, priority?:number}} options
+   */
+  queueRepairPlan(plan, options = {}) {
+    if (!this.isEnabled) return Promise.resolve({ success: false, reason: '扩展未启用' });
+    if (!plan || !plan.success || typeof plan.fixedContent !== 'string') {
+      return Promise.resolve({ success: false, reason: plan?.reason || '修复计划无效' });
+    }
+    return new Promise(resolve => this._addToQueue({
+      messageId: plan.messageId,
+      content: plan.content,
+      fixedContent: plan.fixedContent,
+      plannedContent: plan.fixedContent,
+      strategies: plan.strategies || [],
+      warnings: plan.warnings || [],
+      missingItems: [],
+      ruleId: plan.ruleId || null,
+      ruleName: plan.ruleName || 'structure',
+      featureChanged: plan.featureChanged === true,
+      revalidate: !!plan.ruleId && plan.featureChanged !== true,
+      fixStrategy: plan.strategy || 'structure',
+      message: plan.message,
+      swipeId: Number.isInteger(plan.swipeId) ? plan.swipeId : null,
+      priority: Number.isFinite(options.priority) ? options.priority : (options.manual ? 100 : 60),
+      createdAt: new Date(),
+      status: 'pending',
+      resolve,
+    }));
+  }
+
   getModificationHistory(messageId) { return messageModifier.getModificationHistory(messageId); }
   canUndo(messageId) { return messageModifier.canUndo(messageId); }
   resetStatistics() {
@@ -475,7 +553,9 @@ export class FixCoordinator {
    * @returns {boolean} 是否需要重新验证
    */
   _shouldRevalidate(task) {
-    // 对于重要的修复策略，进行重新验证
+    // 计划任务若只做了普通规则修复，保留 1.4.5 的重新验证行为；
+    // 若叠加了结构清理，则可能与规则目标冲突，避免产生误导性通知。
+    if (typeof task.plannedContent === 'string') return task.revalidate === true;
     return ['thinking-content', 'add-missing-tags'].includes(task.fixStrategy);
   }
 

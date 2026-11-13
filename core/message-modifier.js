@@ -1,10 +1,10 @@
 // Response Linter 消息修改服务
 // 基于SillyTavern的updateMessageBlock实现安全的消息内容修改和DOM更新
 
-// 统一通过 getContext() 与宿主交互，避免直接导入 extensions.js
-// 优先从 st-context.js 模块导入以避免全局未暴露导致的 ReferenceError
-import { getContext as ST_getContext } from '../../../../st-context.js';
-const __getCtx = () => { try { if (window.SillyTavern?.getContext) return window.SillyTavern.getContext(); if (typeof getContext === 'function') return getContext(); if (typeof ST_getContext === 'function') return ST_getContext(); return (window.getContext ? window.getContext() : null); } catch { return null; } };
+// 统一通过 getContext() 与宿主交互，避免直接导入扩展内部文件。
+// 每次写入/确认前重新取上下文，优先实际宿主 window.SillyTavern.getContext。
+import { getFreshContext, isStreamingContext } from './host-context.js';
+const __getCtx = () => getFreshContext();
 
 /**
  * 修改历史记录数据结构
@@ -56,7 +56,7 @@ export class MessageModifier {
    * @param {boolean} requireConfirmation - 是否需要用户确认
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async modifyMessage(messageId, newContent, strategy = 'manual', requireConfirmation = false, expectedContent = null) {
+  async modifyMessage(messageId, newContent, strategy = 'manual', requireConfirmation = false, expectedContent = null, options = {}) {
     messageId = String(messageId);
     if (!this.isEnabled) {
       return {
@@ -99,7 +99,7 @@ export class MessageModifier {
 
       // 如果需要确认，先存储待确认的修改
       if (requireConfirmation) {
-        return await this._handleConfirmationRequired(messageId, originalContent, newContent, strategy);
+        return await this._handleConfirmationRequired(messageId, originalContent, newContent, strategy, options.warnings || []);
       }
 
       // 直接执行修改
@@ -161,6 +161,9 @@ export class MessageModifier {
 
   async _writeState(messageId, message, state) {
     if (this.activeWrites.has(messageId)) return { success: false, metadata: { reason: '此消息正在保存，请稍后重试' } };
+    if (isStreamingContext(__getCtx())) {
+      return { success: false, metadata: { reason: '当前回复仍在流式生成，已跳过写入，请等待生成完成' } };
+    }
     this.activeWrites.add(messageId);
     const before = this._snapshot(message);
     document.dispatchEvent(new CustomEvent('responseLinter.messageWriteStarted', { detail: { messageId } }));
@@ -229,19 +232,22 @@ export class MessageModifier {
    * @param {string} strategy - 修改策略
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async _handleConfirmationRequired(messageId, originalContent, newContent, strategy) {
-    // 存储待确认的修改
+  async _handleConfirmationRequired(messageId, originalContent, newContent, strategy, warnings = []) {
+    // 一次现取消息并同时记录消息/候选回复身份，确认时必须仍指向同一对象与同一 swipe。
+    const message = this._getMessage(messageId);
+    const swipeId = Number.isInteger(message?.swipe_id) ? message.swipe_id : null;
     this.pendingModifications.set(messageId, {
-      message: this._getMessage(messageId),
-      swipeId: this._getMessage(messageId)?.swipe_id,
+      message,
+      swipeId,
       originalContent,
       newContent,
       strategy,
+      warnings: Array.isArray(warnings) ? [...warnings] : [],
       timestamp: new Date(),
     });
 
     // 触发确认事件
-    this._dispatchConfirmationEvent(messageId, originalContent, newContent, strategy);
+    this._dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings);
 
     return {
       success: false,
@@ -276,17 +282,19 @@ export class MessageModifier {
 
     if (confirmed) {
       const current = this._getMessage(messageId);
-      if (!this.isEnabled || current !== pendingModification.message || current?.swipe_id !== pendingModification.swipeId ||
+      const currentSwipeId = Number.isInteger(current?.swipe_id) ? current.swipe_id : null;
+      if (!this.isEnabled || current !== pendingModification.message || currentSwipeId !== pendingModification.swipeId ||
           (current?.extra?.display_text ?? current?.mes ?? '') !== pendingModification.originalContent) {
         return { success: false, metadata: { reason: '消息或启用状态已变化，请重新修复' } };
       }
       // 执行修改
-      return await this._executeModification(
+      const result = await this._executeModification(
         messageId,
         pendingModification.originalContent,
         pendingModification.newContent,
         pendingModification.strategy,
       );
+      return { ...result, warnings: pendingModification.warnings || [] };
     } else {
       // 用户取消修改
       return {
@@ -426,7 +434,7 @@ export class MessageModifier {
    * @param {string} newContent - 新内容
    * @param {string} strategy - 修改策略
    */
-  _dispatchConfirmationEvent(messageId, originalContent, newContent, strategy) {
+  _dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings = []) {
     try {
       const event = new CustomEvent('responseLinter.modificationConfirmationRequired', {
         detail: {
@@ -434,6 +442,7 @@ export class MessageModifier {
           originalContent,
           newContent,
           strategy,
+          warnings: Array.isArray(warnings) ? [...warnings] : [],
           timestamp: new Date(),
         },
       });

@@ -49,6 +49,14 @@
               </div>
             </div>
 
+            <div class="rl-guide-step">
+              <div class="rl-step-number">5</div>
+              <div class="rl-step-content">
+                <strong>可选：回复结构清理</strong>
+                <p>即使不创建规则，也可以打开“清理泄漏的推理块”或“修复 SDC / 正文边界”。SDC 边界修复需要选择历法来源；手动修复始终可用，自动执行还需开启“启用智能自动修复”。</p>
+              </div>
+            </div>
+
             <div class="rl-guide-tips">
               <h5><i class="fa-solid fa-star"></i> 使用技巧</h5>
               <ul>
@@ -89,6 +97,65 @@
             <option value="apply">直接应用修复</option>
           </select>
           <small class="rl-help-text">选择当检测到可自动修复时，点击提示的默认动作</small>
+        </div>
+      </div>
+
+      <hr class="sysHR" />
+
+      <!-- 结构清理（默认关闭；独立于用户规则） -->
+      <div class="rl-section rl-structure-section">
+        <h4>回复结构清理</h4>
+        <small class="rl-help-text">以下开关默认关闭，不依赖“验证规则”，也不会重置你已有的规则。手动修复按钮会使用本段设置；自动执行仍受“启用智能自动修复”开关控制。</small>
+
+        <div class="rl-control-group">
+          <label class="checkbox_label" for="rl-remove-leaked-reasoning">
+            <input id="rl-remove-leaked-reasoning" type="checkbox" />
+            <span>清理泄漏的推理块</span>
+          </label>
+          <small class="rl-help-text">删除完整的 &lt;think&gt;…&lt;/think&gt;、&lt;thinking&gt;…&lt;/thinking&gt; 块。未闭合块只有在后面出现明确 &lt;content&gt; 或 SDC-start 时才删除到该锚点前；否则保留并警告。代码围栏/行内代码绝不修改。</small>
+        </div>
+
+        <div class="rl-control-group">
+          <label class="checkbox_label" for="rl-repair-sdc-boundary">
+            <input id="rl-repair-sdc-boundary" type="checkbox" />
+            <span>修复 SDC / 正文边界</span>
+          </label>
+          <small class="rl-help-text">仅处理含 SDC 标记与 &lt;content&gt; 的回复：把结束注释与 &lt;/content&gt; 移回正文末尾（水印/分隔线/&lt;details&gt; 之前，结束注释必须紧贴 &lt;/content&gt;）。缺少结束注释时，才按下方历法推进时间合成；结构重复、缺少起点或无法推断日期时只警告，不猜测。无法合成时会提示手动补全结束注释的日期、星期与时间。</small>
+        </div>
+
+        <div class="rl-control-group rl-calendar-controls">
+          <label for="rl-sdc-calendar-source">SDC 历法来源（仅用于边界修复合成结束时间）</label>
+          <select id="rl-sdc-calendar-source">
+            <option value="gouhua">构画 / 当前聊天（只读）</option>
+            <option value="four-seasons-28">四季 28 日预设（春夏秋冬各 28 天）</option>
+            <option value="custom">自定义历法 JSON</option>
+          </select>
+          <small class="rl-help-text">“构画 / 当前聊天”只读当前聊天在构画中设置的历法，不会修改构画数据；切换聊天或修改构画历法后，下一次修复立即使用新历法。只有需要补写缺失的结束注释时才读取历法；移动已有标记不会因历法缺失而报警。</small>
+
+          <div class="rl-calendar-row">
+            <label for="rl-sdc-advance-minutes">推进分钟</label>
+            <input id="rl-sdc-advance-minutes" type="number" min="1" max="10080" step="1" value="10" class="text_pole" />
+            <span class="rl-help-text">默认 10 分钟；用于从 SDC-start 合成缺失的 SDC-end。</span>
+          </div>
+
+          <div class="rl-calendar-row rl-calendar-actions">
+            <button id="rl-sdc-calendar-check" class="menu_button secondary" type="button">
+              <i class="fa-solid fa-magnifying-glass"></i> 检测历法
+            </button>
+            <button id="rl-sdc-export-config" class="menu_button secondary" type="button">
+              <i class="fa-solid fa-upload"></i> 导出配置
+            </button>
+            <button id="rl-sdc-import-config" class="menu_button secondary" type="button">
+              <i class="fa-solid fa-download"></i> 导入配置
+            </button>
+          </div>
+          <div id="rl-sdc-calendar-status-text" class="rl-calendar-status" aria-live="polite"></div>
+
+          <div id="rl-sdc-custom-panel" class="rl-calendar-custom-panel">
+            <label for="rl-sdc-custom-calendar">自定义历法 JSON（可编辑、可复制粘贴）</label>
+            <textarea id="rl-sdc-custom-calendar" class="text_pole rl-calendar-json" rows="9" spellcheck="false" placeholder="{&#10;  &quot;kind&quot;: &quot;custom&quot;,&#10;  &quot;months&quot;: [{&quot;name&quot;: &quot;春&quot;, &quot;days&quot;: 28}, ...],&#10;  &quot;weekdays&quot;: [&quot;周一&quot;, &quot;周二&quot;, ...],&#10;  &quot;dateFormat&quot;: &quot;{year}年{month}{day}日&quot;,&#10;  &quot;advanceMinutes&quot;: 10&#10;}"></textarea>
+            <small class="rl-help-text">按顺序填写月份名称与每月天数、按顺序填写星期名称、日期格式必须包含 {year}、{month}、{day}（可选用 {era} 与纪年名）。可选择自定义推进分钟。非法 JSON、重复月名、越界天数、重复日期占位符、未知类型或未支持的闰月规则都不会覆盖上一次有效配置。</small>
+          </div>
         </div>
       </div>
 

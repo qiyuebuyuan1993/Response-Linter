@@ -1580,3 +1580,117 @@ body.rl-modal-open { overflow: hidden !important; }
 .rl-wizard-tip strong {
   color: var(--SmartThemeBodyColor);
 }
+
+/* ===== 结构清理 / SDC 历法 ===== */
+.rl-structure-section .rl-help-text {
+  margin-bottom: 10px;
+}
+
+.rl-calendar-controls {
+  padding: 10px;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 88%, var(--SmartThemeCheckboxBorderColor) 12%);
+}
+
+.rl-calendar-controls select,
+.rl-calendar-controls input[type="number"],
+.rl-calendar-controls textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.rl-calendar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rl-calendar-row label {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+}
+
+.rl-calendar-row input[type="number"] {
+  width: 7.5em;
+  min-height: 2.2em;
+}
+
+.rl-calendar-row .rl-help-text {
+  flex: 1 1 14em;
+  margin-top: 0;
+}
+
+.rl-calendar-actions {
+  gap: 8px;
+}
+
+.rl-calendar-actions .menu_button {
+  flex: 1 1 auto;
+  min-width: 9em;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.rl-calendar-status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--SmartThemeBorderColor);
+  background: var(--SmartThemeBlurTintColor);
+  color: var(--SmartThemeBodyColor);
+  font-size: 0.9em;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.rl-calendar-status:empty {
+  display: none;
+}
+
+.rl-calendar-status.rl-calendar-error {
+  color: #ffc107;
+  border-color: rgba(255, 193, 7, 0.45);
+}
+
+.rl-calendar-custom-panel {
+  margin-top: 12px;
+}
+
+.rl-calendar-json {
+  min-height: 11em;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em;
+  line-height: 1.45;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+
+.rl-confirmation-warnings {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 193, 7, 0.5);
+  border-radius: 6px;
+  color: var(--SmartThemeBodyColor);
+  background: rgba(255, 193, 7, 0.08);
+  text-align: left;
+}
+
+.rl-confirmation-warnings ul {
+  margin: 4px 0 0 1.2em;
+  padding: 0;
+}
+
+@media (max-width: 600px) {
+  .rl-calendar-row .rl-help-text {
+    flex-basis: 100%;
+  }
+  .rl-calendar-actions .menu_button {
+    flex-basis: 100%;
+  }
+}
