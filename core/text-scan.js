@@ -91,6 +91,30 @@ export function findProtectedRanges(text) {
   return mergeRanges(ranges);
 }
 
+/**
+ * 找出 HTML 注释区间，供结构化标签/辅助内容扫描排除注释中的示例。
+ * SDC 标记本身也是注释，调用方需要按用途决定是否排除，不能统一隐藏。
+ * @param {string} text
+ * @returns {Array<{start:number,end:number}>}
+ */
+export function findHtmlCommentRanges(text) {
+  const source = String(text ?? '');
+  const ranges = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const start = source.indexOf('<!--', cursor);
+    if (start === -1) break;
+    const close = source.indexOf('-->', start + 4);
+    if (close === -1) {
+      ranges.push({ start, end: source.length });
+      break;
+    }
+    ranges.push({ start, end: close + 3 });
+    cursor = close + 3;
+  }
+  return ranges;
+}
+
 export function mergeRanges(ranges) {
   const sorted = ranges
     .filter(range => range && Number.isFinite(range.start) && Number.isFinite(range.end) && range.end > range.start)

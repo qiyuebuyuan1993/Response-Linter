@@ -6,10 +6,17 @@ import {
   MAX_ADVANCE_MINUTES,
   parseCustomCalendarConfig,
 } from './calendar-engine.js';
+import {
+  DEFAULT_DETAILS_CHOICES_KEYWORD,
+  DEFAULT_DETAILS_MONOLOGUE_KEYWORD,
+} from './details-repair.js';
 
 export const FEATURE_DEFAULTS = Object.freeze({
   removeLeakedReasoning: false,
   repairSdcBoundary: false,
+  repairDetailsOrder: false,
+  detailsMonologueKeyword: DEFAULT_DETAILS_MONOLOGUE_KEYWORD,
+  detailsChoicesKeyword: DEFAULT_DETAILS_CHOICES_KEYWORD,
   sdcCalendarSource: 'gouhua',
   sdcCustomCalendarJson: '',
   sdcAdvanceMinutes: DEFAULT_ADVANCE_MINUTES,
@@ -39,13 +46,28 @@ export function seedCustomCalendarDraft(draftText, savedCustomJson = '') {
 
 const SOURCES = ['gouhua', 'four-seasons-28', 'custom'];
 
+function readKeyword(value, fallback) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || fallback;
+}
+
 export function readFeatureSettings(raw) {
   const settings = raw && typeof raw === 'object' ? raw : {};
   const advance = Number(settings.sdcAdvanceMinutes ?? settings.advanceMinutes ?? DEFAULT_ADVANCE_MINUTES);
+  let detailsMonologueKeyword = readKeyword(settings.detailsMonologueKeyword, FEATURE_DEFAULTS.detailsMonologueKeyword);
+  let detailsChoicesKeyword = readKeyword(settings.detailsChoicesKeyword, FEATURE_DEFAULTS.detailsChoicesKeyword);
+  if (detailsMonologueKeyword === detailsChoicesKeyword) {
+    // 持久化数据被手工改坏时也不能让运行期目标无法区分；回退到默认关键词。
+    detailsMonologueKeyword = FEATURE_DEFAULTS.detailsMonologueKeyword;
+    detailsChoicesKeyword = FEATURE_DEFAULTS.detailsChoicesKeyword;
+  }
   return {
     removeLeakedReasoning: settings.removeLeakedReasoning === true || settings.removeReasoning === true,
     repairSdcBoundary: settings.repairSdcBoundary === true ||
       settings.repairSdcContentBoundary === true || settings.repairSdcContent === true,
+    repairDetailsOrder: settings.repairDetailsOrder === true,
+    detailsMonologueKeyword,
+    detailsChoicesKeyword,
     sdcCalendarSource: SOURCES.includes(String(settings.sdcCalendarSource ?? settings.calendarSource))
       ? String(settings.sdcCalendarSource ?? settings.calendarSource)
       : FEATURE_DEFAULTS.sdcCalendarSource,
@@ -94,9 +116,34 @@ export function mergeFeatureSettings(previousRaw, uiValues = {}) {
     : previous.sdcAdvanceMinutes;
   if (advance !== advanceRaw) warnings.push(`推进分钟需为 1–${MAX_ADVANCE_MINUTES} 的整数，已保留上次有效值。`);
 
+  let detailsMonologueKeyword = previous.detailsMonologueKeyword;
+  let detailsChoicesKeyword = previous.detailsChoicesKeyword;
+  if (uiValues.detailsMonologueKeyword != null) {
+    const candidate = typeof uiValues.detailsMonologueKeyword === 'string'
+      ? uiValues.detailsMonologueKeyword.trim()
+      : '';
+    if (!candidate) warnings.push('“内心独白”标题关键词不能为空，已保留上次有效值。');
+    else detailsMonologueKeyword = candidate;
+  }
+  if (uiValues.detailsChoicesKeyword != null) {
+    const candidate = typeof uiValues.detailsChoicesKeyword === 'string'
+      ? uiValues.detailsChoicesKeyword.trim()
+      : '';
+    if (!candidate) warnings.push('“你的选择是”标题关键词不能为空，已保留上次有效值。');
+    else detailsChoicesKeyword = candidate;
+  }
+  if (detailsMonologueKeyword === detailsChoicesKeyword) {
+    warnings.push('两个折叠块标题关键词不能相同；已保留上次有效的关键词设置。');
+    detailsMonologueKeyword = previous.detailsMonologueKeyword;
+    detailsChoicesKeyword = previous.detailsChoicesKeyword;
+  }
+
   const fields = {
     removeLeakedReasoning: uiValues.removeLeakedReasoning === true,
     repairSdcBoundary: uiValues.repairSdcBoundary === true,
+    repairDetailsOrder: uiValues.repairDetailsOrder === true,
+    detailsMonologueKeyword,
+    detailsChoicesKeyword,
     sdcCalendarSource: source,
     sdcCustomCalendarJson: typeof customJson === 'string' ? customJson : JSON.stringify(customJson),
     sdcAdvanceMinutes: advance,

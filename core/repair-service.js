@@ -14,10 +14,12 @@ import {
 } from './host-context.js';
 import { sanitizeLeakedReasoning } from './reasoning-sanitizer.js';
 import { repairSdcContent } from './sdc-boundary.js';
+import { repairDetailsOutsideContent } from './details-repair.js';
 
 export const FEATURE_STRATEGIES = Object.freeze({
   reasoning: 'remove-leaked-reasoning',
   boundary: 'sdc-content-boundary',
+  detailsOrder: 'details-outside-content-order',
 });
 
 export function normalizeRepairSettings(raw) {
@@ -26,6 +28,9 @@ export function normalizeRepairSettings(raw) {
   return {
     removeLeakedReasoning: feature.removeLeakedReasoning,
     repairSdcBoundary: feature.repairSdcBoundary,
+    repairDetailsOrder: feature.repairDetailsOrder,
+    detailsMonologueKeyword: feature.detailsMonologueKeyword,
+    detailsChoicesKeyword: feature.detailsChoicesKeyword,
     calendarSource: feature.sdcCalendarSource,
     customCalendarJson: feature.sdcCustomCalendarJson,
     advanceMinutes: feature.sdcAdvanceMinutes,
@@ -35,7 +40,11 @@ export function normalizeRepairSettings(raw) {
 
 export function hasEnabledFeature(settings) {
   const normalized = normalizeRepairSettings(settings);
-  return normalized.removeLeakedReasoning || normalized.repairSdcBoundary;
+  return normalized.removeLeakedReasoning || normalized.repairSdcBoundary || normalized.repairDetailsOrder;
+}
+
+function hasAnyStructureFeature(normalized) {
+  return normalized.removeLeakedReasoning || normalized.repairSdcBoundary || normalized.repairDetailsOrder;
 }
 
 /**
@@ -99,6 +108,22 @@ export function transformContent(content, settings, ctx = null) {
       source: boundary.source || resolved?.source,
       sourceLabel: boundary.sourceLabel || resolved?.sourceLabel,
     };
+  }
+
+  if (normalized.repairDetailsOrder) {
+    // 两个开关同时开启时，先修复正文边界，再在已经安全的外部区域排序折叠块；
+    // 本步骤不移动 SDC-end / </content>，也不触发历法读取。
+    const detailsResult = repairDetailsOutsideContent(current, {
+      monologueKeyword: normalized.detailsMonologueKeyword,
+      choicesKeyword: normalized.detailsChoicesKeyword,
+      boundaryEnabled: normalized.repairSdcBoundary,
+    });
+    details.detailsRepair = detailsResult;
+    if (detailsResult.warnings.length) warnings.push(...detailsResult.warnings);
+    if (detailsResult.changed) {
+      current = detailsResult.content;
+      strategies.push(FEATURE_STRATEGIES.detailsOrder);
+    }
   }
 
   return {
@@ -176,7 +201,7 @@ export function buildRepairPlan({
       ? ruleStrategyOverride
       : ruleValidation.fixStrategy;
     if (!strategy) {
-      if (!normalized.removeLeakedReasoning && !normalized.repairSdcBoundary) {
+      if (!hasAnyStructureFeature(normalized)) {
         return { success: false, reason: '此规则未配置修复策略，未修改消息。', warnings, messageId, swipeId };
       }
       warnings.push('普通规则未配置修复策略；本次只执行已启用的结构清理。');
@@ -203,7 +228,7 @@ export function buildRepairPlan({
           strategies.push(fixResult.strategy);
         } else if (!fixResult.success) {
           ruleReason = fixResult.metadata?.reason || '没有适用的修复策略';
-          if (!normalized.removeLeakedReasoning && !normalized.repairSdcBoundary) {
+          if (!hasAnyStructureFeature(normalized)) {
             return { success: false, reason: ruleReason, warnings, messageId, swipeId };
           }
           warnings.push(`普通规则修复失败（${ruleReason}）；继续执行结构清理。`);
@@ -272,7 +297,13 @@ export function buildRepairPlan({
     swipeId,
     content,
     fixedContent,
-    strategy: strategies.join(' | ') || (normalized.removeLeakedReasoning ? FEATURE_STRATEGIES.reasoning : FEATURE_STRATEGIES.boundary),
+    strategy: strategies.join(' | ') || (
+      normalized.removeLeakedReasoning
+        ? FEATURE_STRATEGIES.reasoning
+        : (normalized.repairSdcBoundary
+          ? FEATURE_STRATEGIES.boundary
+          : (normalized.repairDetailsOrder ? FEATURE_STRATEGIES.detailsOrder : FEATURE_STRATEGIES.boundary))
+    ),
     strategies,
     warnings: [...new Set(warnings)],
     ruleId,

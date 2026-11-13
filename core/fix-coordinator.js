@@ -404,9 +404,10 @@ export class FixCoordinator {
       custom: '自定义修复',
       'remove-leaked-reasoning': '清理泄漏推理',
       'sdc-content-boundary': '修复 SDC/正文边界',
+      'details-outside-content-order': '修复正文外折叠块顺序与配对',
     };
 
-    const strategyName = strategyNames[strategy] || strategy;
+    const strategyName = String(strategy || '').split(' | ').map(name => strategyNames[name] || name).join(' + ');
     const warningHtml = warnings.length
       ? `<div class="rl-confirmation-warnings"><h4>注意：</h4><ul>${warnings.map(item => `<li>${this._escapeHtml(item)}</li>`).join('')}</ul></div>`
       : '';
