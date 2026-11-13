@@ -341,6 +341,9 @@ test('两个开关独立且默认关闭；无用户规则的手动修复仅走 m
   assert.deepEqual(normalizeRepairSettings({}), {
     removeLeakedReasoning: false,
     repairSdcBoundary: false,
+    repairDetailsOrder: false,
+    detailsMonologueKeyword: '内心独白',
+    detailsChoicesKeyword: '你的选择是',
     calendarSource: 'gouhua',
     customCalendarJson: '',
     advanceMinutes: 10,
