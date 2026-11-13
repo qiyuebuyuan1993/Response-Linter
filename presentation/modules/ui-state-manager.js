@@ -1,5 +1,15 @@
 // Response Linter UI状态管理器
 // 重构自原UIState对象，保持完全向后兼容
+import { getFreshContext } from '../../core/host-context.js';
+
+function getCurrentExtensionSettings() {
+  try {
+    const root = getFreshContext()?.extensionSettings || window.extension_settings;
+    return root?.['response-linter'] || {};
+  } catch {
+    return window.extension_settings?.['response-linter'] || {};
+  }
+}
 
 /**
  * UI状态管理器类
@@ -54,6 +64,8 @@ export class UIStateManager {
 
       // 需要访问全局的backendController
       const backendStatus = window.backendController ? window.backendController.getStatus() : { isRunning: false };
+      const settings = getCurrentExtensionSettings();
+      const hasStructureFeature = settings.removeLeakedReasoning === true || settings.repairSdcBoundary === true;
 
       if (!this.isExtensionEnabled) {
         indicator.removeClass('active warning error').addClass('disabled');
@@ -61,7 +73,7 @@ export class UIStateManager {
       } else if (!backendStatus.isRunning) {
         indicator.removeClass('active disabled error').addClass('warning');
         indicator.attr('title', '后端服务未运行');
-      } else if (this.rules.filter(r => r.enabled).length === 0) {
+      } else if (this.rules.filter(r => r.enabled).length === 0 && !hasStructureFeature) {
         indicator.removeClass('active disabled error').addClass('warning');
         indicator.attr('title', '无活跃规则');
       } else {
@@ -83,9 +95,11 @@ export class UIStateManager {
     try {
       const hasRules = this.rules.length > 0;
       const isEnabled = this.isExtensionEnabled;
+      const settings = getCurrentExtensionSettings();
+      const hasStructureFeature = settings.removeLeakedReasoning === true || settings.repairSdcBoundary === true;
 
-      // 如果扩展已启用但没有规则，且指引当前收起，则自动展开
-      if (isEnabled && !hasRules && !this.isGuideExpanded) {
+      // 如果扩展已启用但没有规则、也没有结构清理功能，且指引当前收起，则自动展开
+      if (isEnabled && !hasRules && !hasStructureFeature && !this.isGuideExpanded) {
         this.toggleGuide(true);
 
         // 使用全局toastr显示提示
@@ -169,12 +183,29 @@ export class UIStateManager {
       $('#rl-stat-fix-success').text(fixStats.successRate + '%');
       $('#rl-stat-success').text(stats.successRate + '%');
 
-      // 更新手动修复按钮状态
-      const latestMessageId = this.getLatestAIMessageId();
-      $('#rl-manual-fix').prop('disabled', latestMessageId === null || !this.isExtensionEnabled);
-      $('#rl-undo-fix').prop('disabled', latestMessageId === null || !window.backendController.canUndoFix(latestMessageId));
+      this.refreshManualFixButton();
     } catch (error) {
       console.error('更新统计显示失败:', error);
+    }
+  }
+
+  /**
+   * 只用当前聊天与当前扩展设置刷新手动修复/撤销按钮。
+   * 不依赖 window.extension_settings 的旧镜像，也不要求存在用户规则。
+   */
+  refreshManualFixButton() {
+    try {
+      if (!window.backendController) return;
+      const settings = getCurrentExtensionSettings();
+      const enabled = Object.prototype.hasOwnProperty.call(settings, 'enabled')
+        ? settings.enabled === true
+        : this.isExtensionEnabled === true;
+      this.isExtensionEnabled = enabled;
+      const latestMessageId = this.getLatestAIMessageId();
+      $('#rl-manual-fix').prop('disabled', latestMessageId === null || !enabled);
+      $('#rl-undo-fix').prop('disabled', latestMessageId === null || !window.backendController.canUndoFix(latestMessageId));
+    } catch (error) {
+      console.warn('刷新手动修复按钮失败:', error);
     }
   }
 
