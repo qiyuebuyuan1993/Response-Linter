@@ -16,6 +16,7 @@ import {
   readFeatureSettings,
   seedCustomCalendarDraft,
 } from './core/feature-settings.js';
+import { escapeHtmlText as escapeHtml, joinWarningToasts } from './core/text-safety.js';
 
 // 统一通过 getContext() 与酒馆交互，避免直接导入内部文件。
 // 优先实际宿主 window.SillyTavern.getContext，每次现取。
@@ -171,9 +172,12 @@ const defaultSettings = {
   enabled: false,
   autoFix: false,
   defaultAutoFixAction: 'apply', // 'preview' | 'apply'
-  // 两个结构清理开关默认关闭，不影响老用户既有规则与行为。
+  // 三个结构清理开关默认关闭，不影响老用户既有规则与行为。
   removeLeakedReasoning: false,
   repairSdcBoundary: false,
+  repairDetailsOrder: false,
+  detailsMonologueKeyword: FEATURE_DEFAULTS.detailsMonologueKeyword,
+  detailsChoicesKeyword: FEATURE_DEFAULTS.detailsChoicesKeyword,
   sdcCalendarSource: 'gouhua',
   sdcCustomCalendarJson: '',
   sdcAdvanceMinutes: DEFAULT_ADVANCE_MINUTES,
@@ -238,6 +242,7 @@ async function showFixConfirmationDialog(messageId, originalContent, newContent,
     custom: '自定义修复',
     'remove-leaked-reasoning': '清理泄漏推理',
     'sdc-content-boundary': '修复 SDC/正文边界',
+    'details-outside-content-order': '修复正文外折叠块顺序与配对',
   };
 
   const strategyName = (strategyNames[strategy] || strategy || '').split(' | ').map(name => strategyNames[name] || name).join(' + ');
@@ -316,17 +321,6 @@ async function showFixConfirmationDialog(messageId, originalContent, newContent,
     console.error('显示修复确认对话框失败:', error);
     toastr.error('显示确认对话框出错', '响应检查器');
   }
-}
-
-/**
- * HTML转义函数
- * @param {string} text - 要转义的文本
- * @returns {string} 转义后的文本
- */
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 // RulesManager对象已移除 - 功能已迁移到RulesManagerUI模块
@@ -491,6 +485,9 @@ async function loadSettings() {
   const features = getFeatureSettings(settings);
   $('#rl-remove-leaked-reasoning').prop('checked', features.removeLeakedReasoning);
   $('#rl-repair-sdc-boundary').prop('checked', features.repairSdcBoundary);
+  $('#rl-repair-details-order').prop('checked', features.repairDetailsOrder);
+  $('#rl-details-monologue-keyword').val(features.detailsMonologueKeyword);
+  $('#rl-details-choices-keyword').val(features.detailsChoicesKeyword);
   $('#rl-sdc-calendar-source').val(features.sdcCalendarSource);
   $('#rl-sdc-custom-calendar').val(customJsonForTextarea(features.sdcCustomCalendarJson));
   if (features.sdcCalendarSource === 'custom') {
@@ -564,20 +561,25 @@ function saveSettings() {
   settings.notifications.showSuccess = $('#rl-show-success').prop('checked');
   settings.rules = Array.isArray(UIState.rules) ? UIState.rules : (settings.rules || []);
 
-  // 结构清理开关与历法配置：独立保存；非法 JSON/参数不覆盖上一次有效配置。
+  // 结构清理开关、折叠块关键词与历法配置：独立保存；非法 JSON/参数不覆盖上一次有效配置。
   const merged = mergeFeatureSettings(settings, {
     removeLeakedReasoning: $('#rl-remove-leaked-reasoning').prop('checked') === true,
     repairSdcBoundary: $('#rl-repair-sdc-boundary').prop('checked') === true,
+    repairDetailsOrder: $('#rl-repair-details-order').prop('checked') === true,
+    detailsMonologueKeyword: $('#rl-details-monologue-keyword').val(),
+    detailsChoicesKeyword: $('#rl-details-choices-keyword').val(),
     sdcCalendarSource: $('#rl-sdc-calendar-source').val() || FEATURE_DEFAULTS.sdcCalendarSource,
     sdcCustomCalendarJson: $('#rl-sdc-custom-calendar').val() || '',
     sdcAdvanceMinutes: $('#rl-sdc-advance-minutes').val(),
   });
   Object.assign(settings, merged.fields);
   $('#rl-sdc-calendar-source').val(settings.sdcCalendarSource);
+  $('#rl-details-monologue-keyword').val(settings.detailsMonologueKeyword);
+  $('#rl-details-choices-keyword').val(settings.detailsChoicesKeyword);
   $('#rl-sdc-advance-minutes').val(settings.sdcAdvanceMinutes);
   updateCalendarCustomVisibility();
   for (const warning of merged.warnings) {
-    if (window.toastr) window.toastr.warning(warning, '响应检查器', { timeOut: 6000 });
+    if (window.toastr) window.toastr.warning(escapeHtml(warning), '响应检查器', { timeOut: 6000, escapeHtml: false });
   }
 
   try { refreshCalendarStatus(); } catch {}
@@ -644,7 +646,7 @@ function setupBackendEventHandlers() {
   document.addEventListener('responseLinter.fixApplied', event => {
     const { task, fixResult } = event.detail;
     const warnings = task?.warnings || fixResult?.metadata?.warnings || [];
-    if (warnings.length) toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+    if (warnings.length) toastr.warning(joinWarningToasts(warnings), '响应检查器', { timeOut: 8000, escapeHtml: false });
     toastr.success(`修复成功应用 - ${task.fixStrategy}`, '响应检查器');
     UIState.updateStatistics();
   });
@@ -652,14 +654,14 @@ function setupBackendEventHandlers() {
   // 结构清理警告（例如未闭合推理块无法安全删除）
   document.addEventListener('responseLinter.fixWarning', event => {
     const warnings = event.detail?.warnings || [];
-    if (warnings.length) toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+    if (warnings.length) toastr.warning(joinWarningToasts(warnings), '响应检查器', { timeOut: 8000, escapeHtml: false });
   });
 
   // 监听修复确认事件
   document.addEventListener('responseLinter.fixConfirmed', event => {
     const { messageId, warnings } = event.detail;
     if (Array.isArray(warnings) && warnings.length) {
-      toastr.warning(warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+      toastr.warning(joinWarningToasts(warnings), '响应检查器', { timeOut: 8000, escapeHtml: false });
     }
     toastr.success('修复已确认应用', '响应检查器');
     UIState.updateStatistics();
@@ -748,6 +750,17 @@ function setupEventHandlers() {
     }
   });
 
+  $('#rl-repair-details-order').on('change', function () {
+    saveSettings();
+    if (window.toastr) {
+      window.toastr.info($(this).prop('checked')
+        ? '已启用正文外折叠块顺序与配对修复（只交换两个目标块）'
+        : '已关闭正文外折叠块顺序与配对修复', '响应检查器', { timeOut: 3000 });
+    }
+  });
+
+  $('#rl-details-monologue-keyword, #rl-details-choices-keyword').on('change', saveSettings);
+
   $('#rl-sdc-calendar-source').on('change', function () {
     if ($(this).val() === 'custom') {
       const saved = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
@@ -779,6 +792,9 @@ function setupEventHandlers() {
       const payload = createStructureSettingsExport({
         removeLeakedReasoning: $('#rl-remove-leaked-reasoning').prop('checked') === true,
         repairSdcBoundary: $('#rl-repair-sdc-boundary').prop('checked') === true,
+        repairDetailsOrder: $('#rl-repair-details-order').prop('checked') === true,
+        detailsMonologueKeyword: $('#rl-details-monologue-keyword').val() || settings.detailsMonologueKeyword,
+        detailsChoicesKeyword: $('#rl-details-choices-keyword').val() || settings.detailsChoicesKeyword,
         sdcCalendarSource: exportSource,
         sdcCustomCalendarJson: localCustomText,
         sdcAdvanceMinutes: Number($('#rl-sdc-advance-minutes').val()) || DEFAULT_ADVANCE_MINUTES,
@@ -792,7 +808,7 @@ function setupEventHandlers() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      window.toastr?.success('结构清理/历法配置已导出', '响应检查器');
+      window.toastr?.success('结构清理/历法/折叠块配置已导出', '响应检查器');
     } catch (error) {
       console.error('导出结构清理配置失败:', error);
       window.toastr?.error('导出配置失败', '响应检查器');
@@ -818,10 +834,13 @@ function setupEventHandlers() {
             $('#rl-sdc-calendar-source').val(next.sdcCalendarSource);
             $('#rl-remove-leaked-reasoning').prop('checked', next.removeLeakedReasoning);
             $('#rl-repair-sdc-boundary').prop('checked', next.repairSdcBoundary);
+            $('#rl-repair-details-order').prop('checked', next.repairDetailsOrder);
+            $('#rl-details-monologue-keyword').val(next.detailsMonologueKeyword);
+            $('#rl-details-choices-keyword').val(next.detailsChoicesKeyword);
             $('#rl-sdc-advance-minutes').val(next.sdcAdvanceMinutes);
             updateCalendarCustomVisibility();
             saveSettings();
-            window.toastr?.success('结构清理/历法配置已导入并保存', '响应检查器');
+            window.toastr?.success('结构清理/历法/折叠块配置已导入并保存', '响应检查器');
           } catch (error) {
             console.error('导入结构清理配置失败:', error);
             window.toastr?.error(`导入失败：${error.message}`, '响应检查器', { timeOut: 6000 });
@@ -980,10 +999,10 @@ function setupEventHandlers() {
         toastr.success('修复已应用', '响应检查器');
         UIState.updateStatistics();
       } else if (!result.metadata?.requiresConfirmation) {
-        toastr.error(result.reason || '修复失败', '响应检查器');
+        toastr.error(escapeHtml(result.reason || '修复失败'), '响应检查器', { escapeHtml: false });
       }
       if (Array.isArray(result.warnings) && result.warnings.length) {
-        toastr.warning(result.warnings.map(item => String(item)).join('<br>'), '响应检查器', { timeOut: 8000, escapeHtml: false });
+        toastr.warning(joinWarningToasts(result.warnings), '响应检查器', { timeOut: 8000, escapeHtml: false });
       }
     } catch (error) {
       console.error('手动修复失败:', error);
