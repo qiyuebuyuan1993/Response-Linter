@@ -342,8 +342,6 @@ test('两个开关独立且默认关闭；无用户规则的手动修复仅走 m
     removeLeakedReasoning: false,
     repairSdcBoundary: false,
     repairDetailsOrder: false,
-    detailsMonologueKeyword: '内心独白',
-    detailsChoicesKeyword: '你的选择是',
     calendarSource: 'gouhua',
     customCalendarJson: '',
     advanceMinutes: 10,
@@ -422,8 +420,13 @@ test('自动修复受 autoFix 门控、只写一次且不会因自身渲染事�
   assert.equal(saves, 1, 'same content is deduplicated');
 });
 
-test('自动修复与普通规则可合并执行，且不会重复入队', async () => {
-  const rule = { id: 'r', name: '正文', enabled: true, requiredContent: ['<content>', '</content>'], fixStrategy: 'add-missing-tags' };
+test('自动修复只执行结构功能；enabled 旧规则不会被调用', async () => {
+  let legacyRuleExecuted = false;
+  const rule = {
+    id: 'r', name: '旧规则', enabled: true,
+    requiredContent: ['<content>', '</content>'], fixStrategy: 'add-missing-tags',
+    executeLegacyRule: () => { legacyRuleExecuted = true; },
+  };
   UIState.rules = [rule];
   const source = '<thinking>泄漏</thinking>\n<content>正文';
   __testContext.chat = [messageFixture(source)];
@@ -433,36 +436,40 @@ test('自动修复与普通规则可合并执行，且不会重复入队', async
   const applied = waitForEvent('responseLinter.fixApplied');
   await messageHandler._processMessage('0');
   await applied;
-  assert.equal(__testContext.chat[0].mes, '<content>正文\n</content>');
+  // Reasoning cleanup ran; the legacy add-missing-tags rule did not.
+  assert.equal(__testContext.chat[0].mes, '<content>正文');
+  assert.equal(legacyRuleExecuted, false);
   assert.equal(saves, 1);
 });
 
-test('统一规划失败/歧义/流式抑制仍标记 handled，不再落回旧协调器重复入队', async () => {
-  const rule = { id: 'fail-rule', name: '失败规则', enabled: true, requiredContent: ['<never>'], fixStrategy: 'unknown' };
+test('自动规划不发出旧验证事件，也不落回旧协调器重复入队', async () => {
+  const rule = { id: 'fail-rule', name: '旧失败规则', enabled: true, requiredContent: ['<never>'], fixStrategy: 'unknown' };
   UIState.rules = [rule];
+  let validationEvents = 0;
+  const onValidation = () => { validationEvents++; };
+  document.addEventListener('responseLinter.validationFailed', onValidation);
   const ambiguous = `<content>\n${sdcStart('1年夏5日', '周五', '12:20')}\n${sdcStart('1年夏5日', '周五', '12:21')}\n正文\n</content>`;
   __testContext.chat = [messageFixture(ambiguous)];
   controller.updateSettings({
     enabled: true, autoFix: true, defaultAutoFixAction: 'apply', rules: [rule],
     removeLeakedReasoning: true, repairSdcBoundary: true, sdcCalendarSource: 'gouhua',
   });
-  const failedPromise = waitForEvent('responseLinter.validationFailed');
   await controller._handleMessageProcessed({ messageId: '0', content: ambiguous, name: 'AI' });
-  const failed = await failedPromise;
-  assert.equal(failed.result.metadata.handledByRepairPlan, true);
   await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(validationEvents, 0);
   assert.equal(controller.getFixStatistics().totalAttempts, 0);
   assert.equal(saves, 0);
   assert.equal(fixCoordinator.fixQueue.length, 0);
 
-  const missingCalendar = `<content>\n${sdcStart('1年夏5日', '周五', '12:20')}\n正文\n</content>`;
-  __testContext.chat = [messageFixture(missingCalendar)];
-  __testContext.chatMetadata = {};
-  const missingCalendarPromise = waitForEvent('responseLinter.validationFailed');
-  await controller._handleMessageProcessed({ messageId: '0', content: missingCalendar, name: 'AI' });
-  const missingCalendarFailed = await missingCalendarPromise;
-  assert.equal(missingCalendarFailed.result.metadata.handledByRepairPlan, true);
+  // No structure feature enabled: the auto path must be a no-op even with an
+  // enabled legacy rule and autoFix=true.
+  __testContext.chat = [messageFixture('<thinking>泄漏</thinking>\n<content>正文')];
+  controller.updateSettings({
+    enabled: true, autoFix: true, defaultAutoFixAction: 'apply', rules: [rule],
+  });
+  await controller._handleMessageProcessed({ messageId: '0', content: '<thinking>泄漏</thinking>\n<content>正文', name: 'AI' });
   await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(validationEvents, 0);
   assert.equal(controller.getFixStatistics().totalAttempts, 0);
   assert.equal(saves, 0);
 
@@ -472,14 +479,13 @@ test('统一规划失败/歧义/流式抑制仍标记 handled，不再落回旧�
     enabled: true, autoFix: true, defaultAutoFixAction: 'apply', rules: [rule],
     removeLeakedReasoning: true, repairSdcBoundary: true, sdcCalendarSource: 'four-seasons-28',
   });
-  const streamingPromise = waitForEvent('responseLinter.validationFailed');
   await controller._handleMessageProcessed({ messageId: '0', content: ambiguous, name: 'AI' });
-  const streaming = await streamingPromise;
-  assert.equal(streaming.result.metadata.handledByRepairPlan, true);
   await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(validationEvents, 0);
   assert.equal(controller.getFixStatistics().totalAttempts, 0);
   assert.equal(saves, 0);
   assert.equal(fixCoordinator.fixQueue.length, 0);
+  document.removeEventListener('responseLinter.validationFailed', onValidation);
 });
 
 test('手动预览：取消不写入，确认后保存一次并可撤销；预览不改消息', async () => {

@@ -366,7 +366,10 @@ test('设置默认关闭、旧设置兼容；非法/空/相同关键词保留上
 
   const normalized = normalizeRepairSettings({ repairDetailsOrder: true });
   assert.equal(normalized.repairDetailsOrder, true);
-  assert.equal(normalized.detailsMonologueKeyword, '内心独白');
+  // 1.4.10 moves legacy keywords into the editable profile; runtime planning no
+  // longer consumes a duplicate global keyword pair.
+  assert.equal(Object.hasOwn(normalized, 'detailsMonologueKeyword'), false);
+  assert.equal(Object.hasOwn(normalized, 'detailsChoicesKeyword'), false);
   assert.equal(hasEnabledFeature({ repairDetailsOrder: true }), true);
   assert.equal(hasEnabledFeature({}), false);
 

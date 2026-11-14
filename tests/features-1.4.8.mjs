@@ -174,7 +174,7 @@ beforeEach(() => {
 
 // ===== profiles / migration / settings =====
 
-test('old settings migrate to a versioned legacy profile without resetting rules, flags or keywords', () => {
+test('old settings migrate to an editable legacy profile without resetting flags, selection or effective keywords', () => {
   const old = {
     enabled: true,
     autoFix: false,
@@ -194,7 +194,7 @@ test('old settings migrate to a versioned legacy profile without resetting rules
   assert.equal(migrated.fields.structureProfiles.length, 1);
   assert.equal(migrated.fields.structureProfileId, LEGACY_PROFILE_ID);
   const legacy = migrated.fields.structureProfiles[0];
-  assert.equal(legacy.builtin, true);
+  assert.equal(legacy.builtin, false, 'legacy preset must become editable');
   assert.equal(legacy.time.mode, 'sdc');
   assert.deepEqual(legacy.blocks.map(block => block.id), ['monologue', 'choices']);
   assert.deepEqual(legacy.blocks.map(block => block.titleKeyword), ['心声', '抉择']);
@@ -361,7 +361,12 @@ test('profile import/export round-trips and backward-compatible imports preserve
   });
   const oldImport = importStructureSettingsText(oldExport, previous);
   assert.equal(oldImport.ok, true);
-  assert.deepEqual(oldImport.settings.structureProfiles, previous.structureProfiles);
+  assert.equal(oldImport.settings.structureProfiles.length, previous.structureProfiles.length);
+  const importedLegacy = oldImport.settings.structureProfiles.find(profile => profile.id === LEGACY_PROFILE_ID);
+  assert.equal(importedLegacy.builtin, false, 'old import normalizes the legacy preset to editable');
+  assert.deepEqual(importedLegacy.blocks.map(block => block.titleKeyword), ['心声', '抉择']);
+  assert.equal(importedLegacy.blocks[0].id, 'monologue');
+  assert.equal(importedLegacy.blocks[1].id, 'choices');
   assert.equal(oldImport.settings.structureProfileId, previous.structureProfileId);
 
   const before = structuredClone(previous);
@@ -392,7 +397,10 @@ test('profile import/export round-trips and backward-compatible imports preserve
   }), previous);
   assert.equal(directCalendar.ok, true);
   assert.equal(directCalendar.settings.sdcCalendarSource, 'custom');
-  assert.deepEqual(directCalendar.settings.structureProfiles, before.structureProfiles);
+  assert.equal(directCalendar.settings.structureProfiles.length, before.structureProfiles.length);
+  assert.equal(directCalendar.settings.structureProfiles[0].id, LEGACY_PROFILE_ID);
+  assert.equal(directCalendar.settings.structureProfiles[0].builtin, false);
+  assert.deepEqual(directCalendar.settings.structureProfiles[0].blocks.map(block => block.titleKeyword), ['心声', '抉择']);
 });
 
 test('malicious imported profile text is escaped for toast and editor errors use textContent', () => {
@@ -1040,24 +1048,25 @@ test('repair, undo and save rollback preserve memory extra keys, swipe_info, ina
   assert.equal(saves, 2, 'repair + undo saves; failed rollback does not count another successful save');
 });
 
-test('ordinary rule planning still uses the profile path and preserves current settings shape', () => {
+test('profile-only planning ignores legacy rules and keeps the streamlined settings shape', () => {
   const profile = plainProfile({ blocks: [] });
   const rule = { id: 'r', name: '正文', enabled: true, requiredContent: ['【正文】', '【/正文】'], fixStrategy: 'add-missing-tags' };
   const settings = {
     structureProfilesVersion: 1,
     structureProfiles: [profile],
     structureProfileId: profile.id,
+    rules: [rule],
     repairSdcBoundary: true,
     repairDetailsOrder: false,
   };
   assert.deepEqual(Object.keys(normalizeRepairSettings(settings)).sort(), [
-    'advanceMinutes', 'calendarSource', 'customCalendarJson', 'detailsChoicesKeyword',
-    'detailsMonologueKeyword', 'raw', 'removeLeakedReasoning', 'repairDetailsOrder', 'repairSdcBoundary',
+    'advanceMinutes', 'calendarSource', 'customCalendarJson', 'raw',
+    'removeLeakedReasoning', 'repairDetailsOrder', 'repairSdcBoundary',
   ].sort());
   const source = '【正文】正文';
   const result = transformContent(source, settings, { chatMetadata: {} });
   assert.equal(result.changed, false);
-  assert.equal(rule.requiredContent.length, 2);
+  assert.equal(rule.requiredContent.length, 2, 'legacy rule object is never mutated or executed');
 });
 
 test('literal profile delimiters are case-exact while HTML tags remain case-insensitive', () => {
