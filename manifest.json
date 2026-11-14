@@ -1,11 +1,11 @@
 {
-  "display_name": "Response Linter",
+  "display_name": "响应检查器",
   "loading_order": 666,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "presentation/styles/main.css",
   "author": "shin/il1umi",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "homePage": "https://github.com/qiyuebuyuan1993/Response-Linter"
 }
