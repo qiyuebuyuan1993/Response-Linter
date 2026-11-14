@@ -86,7 +86,7 @@ git clone https://github.com/qiyuebuyuan1993/Response-Linter.git
 - 不修改宿主主题、其它插件设置或构画元数据；不新增千千结/QQJ 存储或事件。
 - 修复、撤销和保存失败回滚保留消息 `extra`、`swipe_info.extra`、非活动候选和相关 `chatMetadata`；撤销是文本快照，不回滚修复后由其它插件新写入的元数据。
 - 使用自定义正文标签时，需要自行在千千结/构画等共享正文设置中配置相同标签。
-- 当前自动化覆盖模拟宿主、纯转换和真实生产模块调用，不等于真实 TauriTavern / Windows / Android 设备与其它扩展组合验收。浏览器手工验收交由 Codex 完成。
+- 当前自动化覆盖模拟宿主、纯转换和真实生产模块调用，不等于真实 TauriTavern / Windows / Android 设备与其它扩展组合验收。Codex 已完成模拟宿主浏览器中的入口、预览、QR、撤销、导入导出与窄屏验收。
 
 ## 测试
 
@@ -96,7 +96,7 @@ git clone https://github.com/qiyuebuyuan1993/Response-Linter.git
 node --test tests/*.mjs
 ```
 
-当前环境禁止测试运行器创建子进程（`spawn EPERM`），因此也支持在同一进程直接执行：
+若运行环境限制测试子进程（`spawn EPERM`），也可在同一进程直接执行：
 
 ```sh
 node tests/regression.mjs
@@ -116,7 +116,7 @@ node tests/features-1.4.10.mjs
 | `tests/features-1.4.8.mjs` | 39 | 自定义档案、正文/时间边界、自动历法、Quick Reply、QQJ 元数据 |
 | `tests/features-1.4.10.mjs` | 8 | 迁移幂等、旧规则留档完整性、旧导入惰性、恶意旧规则不执行、无功能不写入、配置留档往返、入口/UI 精简 |
 
-限制：测试运行器隔离模式在当前沙箱不可用；`tests/harness.html` 是浏览器纯引擎夹具，不能替代真实酒馆验收。
+Codex 独立验收：上述 108 项测试已通过，另有 21 项迁移、结构与千千结兼容检查通过。`tests/harness.html` 是浏览器纯引擎夹具，不能替代真实酒馆验收。
 
 ## 历史更新（简）
 
