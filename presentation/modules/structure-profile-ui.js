@@ -5,7 +5,6 @@ import {
   STRUCTURE_PROFILES_VERSION,
   cloneProfile,
   createBlankProfile,
-  createLegacyProfile,
   moveProfileBlock,
   readStructureProfiles,
   validateStructureProfile,
@@ -52,8 +51,6 @@ export class StructureProfileUI {
       ?.addEventListener('click', () => this.copyCurrent());
     document.getElementById('rl-profile-remove')
       ?.addEventListener('click', () => this.removeCurrent());
-    document.getElementById('rl-profile-restore-legacy')
-      ?.addEventListener('click', () => this.restoreLegacy());
     document.getElementById('rl-profile-save')
       ?.addEventListener('click', () => this.saveDraft());
     document.getElementById('rl-profile-discard')
@@ -102,8 +99,8 @@ export class StructureProfileUI {
       // Keep rendering the captured draft, not a stale pre-edit object.
     } else {
       const active = this.profiles.find(profile => profile.id === this.activeProfileId)
-        || this.profiles[0]
-        || createLegacyProfile(settings);
+        || this.profiles[0];
+      if (!active) return;
       this.currentDraft = this.drafts.get(active.id) || JSON.parse(JSON.stringify(active));
       this.currentDraftId = active.id;
       this.dirty = false;
@@ -119,7 +116,7 @@ export class StructureProfileUI {
     for (const profile of this.profiles) {
       const option = document.createElement('option');
       option.value = profile.id;
-      option.textContent = profile.builtin ? `${profile.name}（内置）` : profile.name;
+      option.textContent = profile.name;
       option.selected = profile.id === this.currentDraftId || (!this.currentDraftId && profile.id === this.activeProfileId);
       select.appendChild(option);
     }
@@ -129,29 +126,6 @@ export class StructureProfileUI {
       option.textContent = `${this.currentDraft.name || '新档案'}（未保存草稿）`;
       option.selected = true;
       select.appendChild(option);
-    }
-  }
-
-  setReadonly(readonly, message = '') {
-    const ids = [
-      'rl-profile-name', 'rl-profile-body-open', 'rl-profile-body-close',
-      'rl-profile-time-mode', 'rl-profile-time-start', 'rl-profile-time-end',
-      'rl-profile-auxiliaries', 'rl-profile-add-block', 'rl-profile-save',
-      'rl-profile-discard',
-    ];
-    for (const id of ids) {
-      const element = document.getElementById(id);
-      if (element) element.disabled = readonly;
-    }
-    for (const element of document.querySelectorAll(
-      '#rl-profile-blocks-list input, #rl-profile-blocks-list textarea, #rl-profile-blocks-list select, #rl-profile-blocks-list button',
-    )) {
-      element.disabled = readonly;
-    }
-    const note = document.getElementById('rl-profile-readonly-note');
-    if (note) {
-      note.style.display = readonly ? 'block' : 'none';
-      if (message) note.textContent = message;
     }
   }
 
@@ -171,10 +145,8 @@ export class StructureProfileUI {
     set('rl-profile-auxiliaries', (draft.auxiliaries || []).join('\n'));
     this.renderBlocks(draft);
     this.updateTimeVisibility();
-    const builtin = draft.builtin === true;
-    this.setReadonly(builtin, '旧版预设用于兼容旧设置，不能直接编辑；请先“复制为自定义”。');
     const remove = document.getElementById('rl-profile-remove');
-    if (remove) remove.disabled = builtin;
+    if (remove) remove.disabled = this.profiles.length <= 1;
   }
 
   renderBlocks(draft) {
@@ -224,7 +196,7 @@ export class StructureProfileUI {
         button.dataset.rlBlockAction = action;
         button.dataset.rlBlockIndex = String(index);
         button.textContent = text;
-        button.disabled = disabled || draft.builtin === true;
+        button.disabled = disabled;
         actions.appendChild(button);
       }
       row.appendChild(actions);
@@ -238,7 +210,7 @@ export class StructureProfileUI {
     if (custom) custom.style.display = mode === 'custom' ? 'block' : 'none';
     for (const id of ['rl-profile-time-start', 'rl-profile-time-end']) {
       const element = document.getElementById(id);
-      if (element) element.disabled = (this.currentDraft?.builtin === true) || mode !== 'custom';
+      if (element) element.disabled = mode !== 'custom';
     }
   }
 
@@ -266,7 +238,7 @@ export class StructureProfileUI {
       version: STRUCTURE_PROFILES_VERSION,
       id: this.currentDraft?.id || this.currentDraftId || nowId(),
       name: value('rl-profile-name').trim(),
-      builtin: this.currentDraft?.builtin === true,
+      builtin: false,
       body: { open: value('rl-profile-body-open'), close: value('rl-profile-body-close') },
       time: {
         mode: value('rl-profile-time-mode') || 'none',
@@ -365,10 +337,6 @@ export class StructureProfileUI {
     const profile = this.profiles.find(item => item.id === this.currentDraftId)
       || this.profiles.find(item => item.id === this.activeProfileId);
     if (!profile) return;
-    if (profile.builtin) {
-      this.setMessage('旧版内置预设不能删除；可选择它作为兼容预设。', true);
-      return;
-    }
     if (this.profiles.length <= 1) {
       this.setMessage('至少需要保留一个结构配置档案，不能删除最后一个。', true);
       return;
@@ -393,29 +361,7 @@ export class StructureProfileUI {
     this.setMessage('档案已删除。');
   }
 
-  async restoreLegacy() {
-    let legacy = this.profiles.find(profile => profile.id === LEGACY_PROFILE_ID);
-    if (!legacy) {
-      legacy = createLegacyProfile(this.getSettings());
-      this.profiles = [legacy, ...this.profiles];
-    }
-    const result = await this.persistProfiles(this.profiles, legacy.id);
-    if (!result?.ok) {
-      this.setMessage((result?.warnings || ['恢复旧版预设失败。']).join(' '), true);
-      return;
-    }
-    this.drafts.delete(legacy.id);
-    this.activeProfileId = legacy.id;
-    this.currentDraftId = legacy.id;
-    this.currentDraft = JSON.parse(JSON.stringify(legacy));
-    this.dirty = false;
-    this.renderSelect();
-    this.renderEditor();
-    this.setMessage('已选择旧版 SDC / content / details 预设。');
-  }
-
   addBlock() {
-    if (this.currentDraft?.builtin) return;
     const draft = this.captureDraftFromForm();
     draft.blocks = draft.blocks || [];
     draft.blocks.push({
@@ -432,7 +378,7 @@ export class StructureProfileUI {
   }
 
   handleBlockAction(action, index) {
-    if (this.currentDraft?.builtin || !Number.isInteger(index)) return;
+    if (!Number.isInteger(index)) return;
     let draft = this.captureDraftFromForm();
     if (action === 'remove') {
       draft.blocks.splice(index, 1);
@@ -450,10 +396,11 @@ export class StructureProfileUI {
 
   async saveDraft() {
     const draft = this.captureDraftFromForm();
-    if (!draft || draft.builtin) {
-      this.setMessage('内置旧版预设不能直接保存；请复制为自定义。', true);
+    if (!draft) {
+      this.setMessage('当前档案内容无法读取；草稿仍保留。', true);
       return;
     }
+    draft.builtin = false;
     const others = this.profiles.filter(profile => profile.id !== draft.id);
     if (others.some(profile => profile.name === draft.name)) {
       this.setMessage('档案名称必须唯一；已保留当前草稿。', true);
