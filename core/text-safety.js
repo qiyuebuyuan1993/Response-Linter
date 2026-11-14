@@ -13,6 +13,21 @@ export function escapeHtmlText(value) {
 }
 
 /**
+ * Format a prefixed error message for toastr, which renders HTML. Imported
+ * profile names/modes/delimiters can be reflected in validation errors, so
+ * both the prefix and the message are escaped before they leave this helper.
+ * @param {string} prefix
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function formatErrorForToast(prefix, error) {
+  const message = error && typeof error === 'object' && 'message' in error
+    ? error.message
+    : error;
+  return `${escapeHtmlText(prefix ?? '')}${escapeHtmlText(message ?? '')}`;
+}
+
+/**
  * 把多条警告拼成 toastr 可用的安全 HTML 片段，仅保留受控的 <br> 分隔。
  * @param {Array<unknown>} warnings
  * @returns {string}

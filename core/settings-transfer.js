@@ -6,9 +6,19 @@ import {
   parseCustomCalendarConfig,
 } from './calendar-engine.js';
 import { FEATURE_DEFAULTS, readFeatureSettings } from './feature-settings.js';
+import {
+  MAX_PROFILES,
+  STRUCTURE_PROFILES_VERSION,
+  readStructureProfiles,
+  validateStructureProfile,
+} from './structure-profiles.js';
 
 export const STRUCTURE_SETTINGS_FORMAT = 'response-linter-structure-settings';
 export const STRUCTURE_SETTINGS_VERSION = 1;
+// A valid maximum-size profile collection (40 × 20 blocks with all allowed
+// field lengths) can exceed the old 50k bound. Imports/export use the same
+// practical 1 MiB ceiling so every supported export remains re-importable.
+export const MAX_STRUCTURE_SETTINGS_TEXT = 4_000_000;
 const SOURCES = ['gouhua', 'four-seasons-28', 'custom'];
 const CALENDAR_KEYS = [
   'kind', 'months', 'weekdayCycle', 'weekdayLabels', 'weekdays', 'dateFormat',
@@ -67,6 +77,81 @@ function hasAnyKey(object, keys) {
   return keys.some(key => Object.prototype.hasOwnProperty.call(object, key));
 }
 
+function hasForbiddenKey(value, depth = 0, seen = new WeakSet()) {
+  if (depth > 12 || value == null || typeof value !== 'object') return false;
+  if (seen.has(value)) return true;
+  seen.add(value);
+  for (const key of Object.keys(value)) {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') return true;
+    if (hasForbiddenKey(value[key], depth + 1, seen)) return true;
+  }
+  return false;
+}
+
+function profileFieldsForExport(input) {
+  const collection = readStructureProfiles(input);
+  if (!Array.isArray(collection.profiles) || !collection.profiles.length) {
+    throw new Error('没有可导出的结构配置档案');
+  }
+  const checked = [];
+  const ids = new Set();
+  for (const item of collection.profiles) {
+    const result = validateStructureProfile(item);
+    if (!result.ok) throw new Error(`结构配置档案无效：${result.error}`);
+    if (ids.has(result.profile.id)) throw new Error(`结构配置档案 id 重复：「${result.profile.id}」`);
+    ids.add(result.profile.id);
+    checked.push(result.profile);
+  }
+  const activeProfileId = collection.activeProfileId;
+  if (!ids.has(activeProfileId)) throw new Error('当前选中的结构配置档案不在导出列表中');
+  return {
+    structureProfilesVersion: STRUCTURE_PROFILES_VERSION,
+    structureProfiles: checked,
+    structureProfileId: activeProfileId,
+  };
+}
+
+function parseImportedProfiles(parsed, previousCollection) {
+  if (!hasAnyKey(parsed, ['structureProfiles', 'structureProfileId', 'structureProfilesVersion'])) {
+    return {
+      structureProfilesVersion: previousCollection.version,
+      structureProfiles: previousCollection.profiles,
+      structureProfileId: previousCollection.activeProfileId,
+    };
+  }
+  if (parsed.structureProfilesVersion != null) {
+    if (!Number.isInteger(parsed.structureProfilesVersion) ||
+        parsed.structureProfilesVersion !== STRUCTURE_PROFILES_VERSION) {
+      throw new Error(`不支持的结构配置档案版本：${String(parsed.structureProfilesVersion)}`);
+    }
+  }
+  if (!Array.isArray(parsed.structureProfiles)) throw new Error('structureProfiles 必须是数组');
+  if (!parsed.structureProfiles.length) throw new Error('结构配置档案列表不能为空');
+  if (parsed.structureProfiles.length > MAX_PROFILES) throw new Error(`结构配置档案最多 ${MAX_PROFILES} 个`);
+  if (typeof parsed.structureProfileId !== 'string' || !parsed.structureProfileId.trim()) {
+    throw new Error('必须提供有效的当前结构配置档案 id');
+  }
+  const checked = [];
+  const ids = new Set();
+  const names = new Set();
+  for (const item of parsed.structureProfiles) {
+    const result = validateStructureProfile(item);
+    if (!result.ok) throw new Error(`结构配置档案无效：${result.error}`);
+    if (ids.has(result.profile.id)) throw new Error(`结构配置档案 id 重复：「${result.profile.id}」`);
+    if (names.has(result.profile.name)) throw new Error(`结构配置档案名称重复：「${result.profile.name}」`);
+    ids.add(result.profile.id);
+    names.add(result.profile.name);
+    checked.push(result.profile);
+  }
+  const activeProfileId = parsed.structureProfileId.trim();
+  if (!ids.has(activeProfileId)) throw new Error('当前选中的结构配置档案不存在');
+  return {
+    structureProfilesVersion: STRUCTURE_PROFILES_VERSION,
+    structureProfiles: checked,
+    structureProfileId: activeProfileId,
+  };
+}
+
 function safePreviousAdvance(value) {
   try { return advanceOf(value); } catch { return DEFAULT_ADVANCE_MINUTES; }
 }
@@ -90,9 +175,11 @@ export function createStructureSettingsExport(input = {}) {
     '“你的选择是”标题关键词',
   );
   validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
+  const profileFields = profileFieldsForExport(input);
   return {
     format: STRUCTURE_SETTINGS_FORMAT,
     version: STRUCTURE_SETTINGS_VERSION,
+    ...profileFields,
     removeLeakedReasoning: input.removeLeakedReasoning === true,
     repairSdcBoundary: input.repairSdcBoundary === true,
     repairDetailsOrder: input.repairDetailsOrder === true,
@@ -107,19 +194,23 @@ export function createStructureSettingsExport(input = {}) {
 
 export function importStructureSettingsText(text, previous = {}) {
   if (typeof text !== 'string') return { ok: false, error: '导入内容必须是 JSON 文本' };
-  if (text.length > 50000) return { ok: false, error: '配置 JSON 过长（最多 50000 字符）' };
+  if (text.length > MAX_STRUCTURE_SETTINGS_TEXT) {
+    return { ok: false, error: `配置 JSON 过长（最多 ${MAX_STRUCTURE_SETTINGS_TEXT} 字符）` };
+  }
   let parsed;
   try { parsed = JSON.parse(text); }
   catch (error) { return { ok: false, error: `JSON 解析失败：${error.message}` }; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { ok: false, error: '配置文件必须是 JSON 对象' };
   }
+  if (hasForbiddenKey(parsed)) return { ok: false, error: '配置文件包含不允许的属性名' };
 
   try {
     const previousFeatures = previous && typeof previous === 'object' ? previous : {};
     // 旧设置/旧导出缺少新字段时按“关闭 + 默认标题关键词”处理，且不覆盖上次有效值。
     const previousValid = readFeatureSettings(previousFeatures);
     const previousAdvance = safePreviousAdvance(previousValid.sdcAdvanceMinutes);
+    const previousProfiles = readStructureProfiles(previousFeatures);
 
     // 直接粘贴一份自定义历法 JSON（months 等）也应可用。
     if (hasAnyKey(parsed, CALENDAR_KEYS)) {
@@ -131,6 +222,9 @@ export function importStructureSettingsText(text, previous = {}) {
       return {
         ok: true,
         settings: {
+          structureProfilesVersion: previousProfiles.version,
+          structureProfiles: previousProfiles.profiles,
+          structureProfileId: previousProfiles.activeProfileId,
           removeLeakedReasoning: previousValid.removeLeakedReasoning,
           repairSdcBoundary: previousValid.repairSdcBoundary,
           repairDetailsOrder: previousValid.repairDetailsOrder,
@@ -158,6 +252,7 @@ export function importStructureSettingsText(text, previous = {}) {
       'removeLeakedReasoning', 'repairSdcBoundary', 'repairDetailsOrder',
       'detailsMonologueKeyword', 'detailsChoicesKeyword',
       'sdcCalendarSource', 'sdcCustomCalendarJson', 'sdcAdvanceMinutes',
+      'structureProfiles', 'structureProfileId', 'structureProfilesVersion',
     ])) {
       return { ok: false, error: '配置为空或缺少可导入的结构清理/历法/折叠块字段' };
     }
@@ -197,10 +292,12 @@ export function importStructureSettingsText(text, previous = {}) {
       '“你的选择是”标题关键词',
     );
     validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
+    const profileFields = parseImportedProfiles(parsed, previousProfiles);
 
     return {
       ok: true,
       settings: {
+        ...profileFields,
         removeLeakedReasoning: typeof parsed.removeLeakedReasoning === 'boolean'
           ? parsed.removeLeakedReasoning
           : previousValid.removeLeakedReasoning,
