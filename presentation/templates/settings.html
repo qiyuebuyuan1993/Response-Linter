@@ -111,7 +111,8 @@
       </div>
       <div class="rl-form-group">
         <label for="rl-profile-auxiliaries">外部辅助标记（每行一个，可选）</label>
-        <textarea id="rl-profile-auxiliaries" class="text_pole" rows="3" spellcheck="false" placeholder="&lt;版权水印&gt;&#10;&lt;details&gt;"></textarea>
+        <textarea id="rl-profile-auxiliaries" class="text_pole" rows="3" spellcheck="false" aria-describedby="rl-profile-auxiliaries-help" placeholder="&lt;版权水印&gt;&#10;&lt;details&gt;"></textarea>
+        <p id="rl-profile-auxiliaries-help" class="rl-help-text">用于识别正文外内容的起点，帮助“修复正文 / 时间边界”把正文结束分隔符放到这些内容之前；不会删除标记或其后的内容。每行填写一个实际使用的标记，例如 &lt;版权水印&gt;、&lt;details&gt;，不要填写正文中也会出现的标记。SDC-end 始终放在正文结束分隔符之前。块的排序与配对请在下方“末尾结构块顺序”配置。</p>
       </div>
       <div class="rl-form-group">
         <label>末尾结构块顺序（从上到下为期望顺序）</label>

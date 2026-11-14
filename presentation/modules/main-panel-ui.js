@@ -15,7 +15,9 @@ function isModalVisible() {
     return candidates.some(element => {
       const style = window.getComputedStyle?.(element);
       if (!style) return !element.hidden;
-      return style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden;
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden
+        && rect.width > 0 && rect.height > 0;
     });
   } catch {
     return false;
@@ -148,7 +150,7 @@ export function setupMainPanel({
   };
 
   const close = () => {
-    if (overlay.hidden || isModalVisible()) return;
+    if (overlay.hidden) return;
     overlay.hidden = true;
     document.body.classList.remove('rl-main-panel-open');
     try { onClose(); } catch {}
@@ -169,9 +171,10 @@ export function setupMainPanel({
     if (event.target === overlay) close();
   });
   document.addEventListener('keydown', event => {
-    if (overlay.hidden) return;
+    // Only keyboard focus/Escape handling yields to another visible modal.
+    // Explicit close must never be blocked by host popup placeholders.
+    if (overlay.hidden || isModalVisible()) return;
     if (event.key === 'Escape') {
-      if (isModalVisible()) return;
       event.preventDefault();
       close();
       return;

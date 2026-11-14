@@ -1,4 +1,4 @@
-// Response Linter 1.4.10 — streamlined structure-repair edition.
+// Response Linter 1.4.11 — streamlined structure-repair edition.
 // Only the three structure-repair features, editable reply-structure profiles,
 // calendar awareness, Quick Reply/wand/drawer entry points and manual/auto
 // repair/undo are active. Legacy generic validation rules are archived inertly
@@ -57,7 +57,7 @@ const __getCtx = () => getFreshContext();
 const extensionName = 'response-linter';
 const extensionFolderPath = new URL('.', import.meta.url).pathname.replace(/\/$/, '');
 
-try { console.info('[Response Linter] 1.4.10 streamlined index loaded'); } catch {}
+try { console.info('[Response Linter] 1.4.11 streamlined index loaded'); } catch {}
 
 function getSettingsRoot() {
   try {
@@ -1005,9 +1005,9 @@ jQuery(async () => {
     }, 8000);
 
     window.ResponseLinter = window.ResponseLinter || {};
-    window.ResponseLinter.version = '1.4.10';
+    window.ResponseLinter.version = '1.4.11';
     window.ResponseLinter.backendController = backendController;
-    console.info('[Response Linter] 1.4.10 初始化完成');
+    console.info('[Response Linter] 1.4.11 初始化完成');
   } catch (error) {
     console.error('[Response Linter] 扩展初始化失败:', error);
     showSettingsToast('error', '响应检查器扩展加载失败');
