@@ -1,14 +1,16 @@
-# 响应检查器 Response Linter 1.4.10
+# 响应检查器 Response Linter 1.4.11
 
 基于 [il1umi/Response-Linter](https://github.com/il1umi/Response-Linter) 的个人维护分支。
 
 1.4.10 是**精简版**：只保留回复结构修复。旧的通用验证规则、规则模板、规则编辑器、配置向导、诊断和统计界面已从生产路径移除。旧规则会一次性归档为不可执行的数据备份，不会被任何消息处理器、后端控制器或修复协调器执行。
 
-![版本](https://img.shields.io/badge/版本-1.4.10-blue.svg)
+![版本](https://img.shields.io/badge/版本-1.4.11-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue.svg)
 ![SillyTavern](https://img.shields.io/badge/SillyTavern-兼容-brightgreen.svg)
 
 ## 当前功能
+
+**1.4.11 界面修复**：恢复关闭按钮正常退出；Esc/Tab 仅在另一可见弹窗出现时让出处理，忽略零尺寸占位容器。修正美化主题下复选框宽度塌缩（自动修复、启用及三个功能开关），保留主题勾选样式；魔法棒图标与名称恢复左对齐。现有配置和消息修复逻辑不变。
 
 - **推理清理**：删除完整的 `<think>…</think>` / `<thinking>…</thinking>`。未闭合块只有在当前档案的正文或时间起点前有明确边界时才清理；代码围栏、行内代码和注释示例不改。
 - **正文 / 时间边界修复**：按当前回复结构档案移动正文结束分隔符与时间结束标记。已有时间结束标记逐字节保留；缺失时才按历法推进合成。无时间模式不读取历法。
