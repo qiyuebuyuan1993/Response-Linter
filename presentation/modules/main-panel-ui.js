@@ -37,9 +37,10 @@ function drawerLauncherHtml() {
 function wandLauncherHtml() {
   return `
     <div id="rl_wand_container" class="extension_container">
-      <div id="rl-wand-button" class="extensionsMenuExtensionButton menu_button" role="button" tabindex="0"
+      <div id="rl-wand-button" class="list-group-item flex-container flexGap5" role="button" tabindex="0"
         title="响应检查器：规则、结构档案与修复" aria-label="打开响应检查器设置">
-        <i class="fa-solid fa-wrench"></i> 响应检查器
+        <i class="fa-solid fa-wrench extensionsMenuExtensionButton" aria-hidden="true"></i>
+        <span>响应检查器</span>
       </div>
     </div>
   `;
