@@ -1696,34 +1696,163 @@ body.rl-modal-open { overflow: hidden !important; }
 }
 
 /* ===== 1.4.8 main panel / wand launchers / structure profiles ===== */
+.rl-drawer-card {
+  width: 100%;
+  min-width: 0;
+}
+
 .rl-drawer-launcher {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 0;
-}
-
-.rl-drawer-launcher-text {
+  width: 100%;
   min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 4px;
+  cursor: pointer;
+  border-radius: 6px;
+  touch-action: manipulation;
 }
 
-.rl-drawer-launcher-text b {
-  display: block;
+.rl-drawer-launcher:hover {
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 82%, var(--SmartThemeBodyColor) 8%);
 }
 
-.rl-drawer-launcher-text small {
-  display: block;
-  color: var(--SmartThemeQuoteColor);
+.rl-drawer-launcher:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.rl-drawer-launcher b {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 210px;
+}
+
+.rl-drawer-launcher .inline-drawer-icon {
+  flex: 0 0 auto;
+  pointer-events: auto;
+}
+
+#rl-wand-button {
+  min-width: 38px;
+  min-height: 38px;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+#rl-wand-button .extensionsMenuExtensionButton {
+  pointer-events: auto;
 }
 
 #rl-wand-button:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: -2px;
+}
+
+/* Streamlined 1.4.10 panel */
+.rl-primary-heading,
+.rl-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rl-primary-heading h4,
+.rl-repair-plan-header h4 {
+  margin: 0;
+}
+
+.rl-primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0 4px;
+}
+
+.rl-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rl-inline-actions {
+  justify-content: flex-end;
+}
+
+.rl-feature-switches {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 7px;
+  min-width: 0;
+}
+
+.rl-feature-switches legend {
+  padding: 0 4px;
+  color: var(--SmartThemeQuoteColor);
+  font-size: 0.9em;
+}
+
+.rl-feature-switches .rl-control-group {
+  margin-bottom: 6px;
+}
+
+.rl-disclosure {
+  margin: 10px 0;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 90%, transparent);
+  min-width: 0;
+}
+
+.rl-disclosure > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--SmartThemeBodyColor);
+  border-radius: 7px;
+  touch-action: manipulation;
+}
+
+.rl-disclosure > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.rl-disclosure[open] > summary {
+  border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.rl-disclosure-body {
+  padding: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rl-nested-disclosure {
+  margin-top: 10px;
+  background: transparent;
+}
+
+.rl-short-help p {
+  margin: 0 0 8px;
+  line-height: 1.45;
+}
+
+.rl-short-help p:last-child {
+  margin-bottom: 0;
+}
+
+.rl-legacy-backup-status {
+  min-width: 0;
 }
 
 .rl-main-panel-overlay {
@@ -1962,7 +2091,7 @@ body.rl-main-panel-open {
 }
 
 @media (max-width: 520px) {
-  .rl-main-panel-body input,
+  .rl-main-panel-body input:not([type="checkbox"]),
   .rl-main-panel-body select,
   .rl-main-panel-body textarea,
   .rl-main-panel-body .menu_button {
@@ -1984,4 +2113,15 @@ body.rl-main-panel-open {
   .rl-main-panel-body .rl-form-actions {
     flex-wrap: wrap;
   }
+}
+
+.rl-main-panel-body .checkbox_label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rl-main-panel-body input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
 }
