@@ -1,31 +1,22 @@
-// Response Linter 后端控制器
-// 整合验证引擎、消息处理器、修复协调器和通知系统，提供统一的后端接口
-
+// Response Linter 1.4.10 backend controller.
+// Coordinates only the three structure-repair features and the shared repair
+// coordinator. Generic validation rules are never initialized, validated or
+// executed here, even if legacy settings/imports still contain them.
 import { getFreshContext } from './host-context.js';
-import { buildRepairPlan, hasEnabledFeature, normalizeRepairSettings } from './repair-service.js';
+import { buildRepairPlan, hasEnabledFeature } from './repair-service.js';
 import { fixCoordinator } from './fix-coordinator.js';
 import { messageHandler } from './message-handler.js';
-import { validationEngine } from './validation-engine.js';
-import { autoFixEngine } from './auto-fix-engine.js';
 
-// 每次现取宿主上下文；优先 window.SillyTavern.getContext。
 const __getCtx = () => getFreshContext();
-const __ctx = __getCtx() || {};
-const extension_settings = __ctx.extensionSettings || window.extension_settings || {};
 
-/**
- * 后端控制器核心类
- * 负责协调各个模块的工作，包括验证和修复功能
- */
 export class BackendController {
   constructor(extensionName) {
     this.extensionName = extensionName;
     this.isInitialized = false;
     this.isRunning = false;
     this.settings = null;
-    this._autoPlanKeys = new Map(); // messageId -> 最近一次已排队的自动修复指纹，避免同一内容重复入队
-
-    // 统计数据（整合修复统计）
+    this._autoPlanKeys = new Map(); // messageId -> last queued plan fingerprint
+    this._warningKeys = new Map();
     this.statistics = {
       totalValidations: 0,
       failedValidations: 0,
@@ -34,65 +25,31 @@ export class BackendController {
       userCancellations: 0,
       lastActivity: null,
     };
-
-    // 绑定事件处理器
     this._bindEventHandlers();
   }
 
-  /**
-   * 初始化后端系统
-   * @param {Object} settings - 扩展设置
-   */
   initialize(settings) {
-    if (this.isInitialized) {
-      console.warn('[Response Linter] 后端控制器已初始化');
-      return;
-    }
-
+    if (this.isInitialized) return;
     try {
-      console.log('[Response Linter] 初始化后端系统（包含修复功能）');
       this.settings = settings || {};
-
-      // 初始化验证引擎
-      const activeRules = (settings.rules || []).filter(rule => rule.enabled);
-      validationEngine.initialize(activeRules, settings.enabled);
-
-      // 初始化修复协调器（传递默认行为以决定是否需要确认）
       fixCoordinator.initialize({
-        enabled: settings.enabled,
-        autoFix: settings.autoFix || false,
-        defaultAutoFixAction: settings.defaultAutoFixAction,
+        enabled: this.settings.enabled,
+        autoFix: this.settings.autoFix || false,
+        defaultAutoFixAction: this.settings.defaultAutoFixAction,
       });
-
-      // 如果启用了扩展，且存在普通规则或任一结构清理开关，开始监听消息
-      if (settings.enabled && (activeRules.length > 0 || hasEnabledFeature(settings))) {
-        this.start();
-      }
-
       this.isInitialized = true;
-      console.log('[Response Linter] 后端系统初始化完成');
+      this._syncListening();
     } catch (error) {
       console.error('[Response Linter] 后端系统初始化失败:', error);
       this.isInitialized = false;
     }
   }
 
-  /**
-   * 启动后端服务
-   */
   start() {
-    if (this.isRunning) {
-      console.warn('[Response Linter] 后端服务已在运行');
-      return;
-    }
-
+    if (this.isRunning) return;
     try {
-      // 启动消息监听
-      console.info('[Response Linter] 尝试启动消息监听...');
-      messageHandler.startListening(); // 内部会打印 [Response Linter] 消息处理器开始监听事件
+      messageHandler.startListening();
       this.isRunning = true;
-
-      console.log('[Response Linter] 后端服务已启动');
       this._dispatchStatusEvent('backendStarted');
     } catch (error) {
       console.error('[Response Linter] 启动后端服务失败:', error);
@@ -100,193 +57,80 @@ export class BackendController {
     }
   }
 
-  /**
-   * 停止后端服务
-   */
   stop() {
-    if (!this.isRunning) {
-      return;
-    }
-
+    if (!this.isRunning) return;
     try {
-      // 停止消息监听
       messageHandler.stopListening();
       this.isRunning = false;
-
-      console.log('[Response Linter] 后端服务已停止');
       this._dispatchStatusEvent('backendStopped');
     } catch (error) {
       console.error('[Response Linter] 停止后端服务失败:', error);
     }
   }
 
-  /**
-   * 更新后端配置
-   * @param {Object} settings - 新的设置
-   */
   updateSettings(settings) {
     try {
       this.settings = settings || {};
-      // 更新验证引擎设置
-      const activeRules = (settings.rules || []).filter(rule => rule.enabled);
-      validationEngine.updateRules(activeRules);
-      validationEngine.setEnabled(settings.enabled);
-
-      // 更新修复协调器设置（包含默认行为）
       fixCoordinator.updateSettings({
-        enabled: settings.enabled,
-        autoFix: settings.autoFix || false,
-        defaultAutoFixAction: settings.defaultAutoFixAction,
+        enabled: this.settings.enabled,
+        autoFix: this.settings.autoFix || false,
+        defaultAutoFixAction: this.settings.defaultAutoFixAction,
       });
-
-      // 根据设置状态控制服务运行：无普通规则但有结构清理开关时仍需监听。
-      if (settings.enabled && (activeRules.length > 0 || hasEnabledFeature(settings))) {
-        if (!this.isRunning) {
-          this.start();
-        }
-      } else {
-        if (this.isRunning) {
-          this.stop();
-        }
-      }
-
-      console.log('[Response Linter] 后端设置已更新');
+      this._syncListening();
     } catch (error) {
       console.error('[Response Linter] 更新后端设置失败:', error);
     }
   }
 
-  /**
-   * 每次事件都尝试读取最新设置根；UI 保存后无需等待缓存刷新。
-   */
+  _syncListening() {
+    const settings = this.settings || {};
+    // Automatic repair only needs event listening when at least one structure
+    // feature is enabled. Manual repair reads the latest message directly.
+    const shouldListen = settings.enabled === true && settings.autoFix === true && hasEnabledFeature(settings);
+    if (shouldListen && !this.isRunning) this.start();
+    else if (!shouldListen && this.isRunning) this.stop();
+  }
+
   _getCurrentSettings() {
     try {
       const ctx = __getCtx();
       const fresh = ctx?.extensionSettings?.[this.extensionName];
       if (fresh && typeof fresh === 'object') {
-        // 宿主当前命名空间应优先，但保留 controller 已知字段，
-        // 避免测试/早期局部设置对象缺少规则或结构清理字段时被当成“全部关闭”。
+        // Host namespace wins, but keep known controller fields for tests and
+        // early partial settings objects. Generic `rules` are never consulted.
         return { ...(this.settings || {}), ...fresh };
       }
     } catch {}
     return this.settings || {};
   }
 
-  _hasActiveRules(settings) {
-    return Array.isArray(settings?.rules) && settings.rules.some(rule => rule && rule.enabled);
-  }
+  // Compatibility surface: generic validation is no longer part of production.
+  validateLatestMessage() { return null; }
+  validateContent() { return null; }
 
-  /**
-   * 手动验证最新消息
-   * @returns {Object|null} 验证结果
-   */
-  validateLatestMessage() {
-    try {
-      const latestMessage = messageHandler.getLatestAIMessage();
-
-      if (!latestMessage) {
-        console.warn('没有找到AI消息进行验证');
-        return null;
-      }
-
-      const result = validationEngine.validateMessage(latestMessage.content, latestMessage.id);
-
-      if (result) {
-        // 规范化消息数据结构，确保包含 messageId 字段（事件流同名）
-        const messageData = {
-          messageId: String(latestMessage.id),
-          content: latestMessage.content,
-          name: latestMessage.name,
-          timestamp: latestMessage.timestamp,
-        };
-        this._handleValidationResult(result, messageData);
-      }
-
-      return result;
-    } catch (error) {
-      console.error('手动验证失败:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 验证指定内容
-   * @param {string} content - 要验证的内容
-   * @param {string} messageId - 消息ID（用于标识）
-   * @returns {Object|null} 验证结果
-   */
-  validateContent(content, messageId = 'manual-validation') {
-    try {
-      if (!content || typeof content !== 'string') {
-        console.warn('验证内容无效:', content);
-        return null;
-      }
-
-      // 直接使用验证引擎验证内容
-      const result = validationEngine.validateMessage(content, messageId);
-
-      // 更新统计（但不触发事件，因为这是手动测试）
-      if (result && !result.isValid) {
-        this.statistics.totalValidations++;
-        this.statistics.failedValidations++;
-      } else if (result) {
-        this.statistics.totalValidations++;
-      }
-
-      return result;
-    } catch (error) {
-      console.error('内容验证失败:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 获取后端状态
-   * @returns {Object} 完整的状态信息
-   */
   getStatus() {
     return {
       isInitialized: this.isInitialized,
       isRunning: this.isRunning,
       extensionName: this.extensionName,
-      statistics: { ...this.statistics },
-      validationEngine: validationEngine.getStatistics(),
       messageHandler: messageHandler.getStatus(),
       fixCoordinator: fixCoordinator.getStatus(),
     };
   }
 
-  /**
-   * 获取统计数据
-   * @returns {Object} 统计信息
-   */
   getStatistics() {
-    const engineStats = validationEngine.getStatistics();
     const fixes = fixCoordinator.getStatistics();
-
     return {
-      totalValidations: this.statistics.totalValidations,
-      failedValidations: this.statistics.failedValidations,
+      totalValidations: 0,
+      failedValidations: 0,
       successfulFixes: fixes.successfulFixes,
       totalFixAttempts: fixes.totalTasks,
       userCancellations: fixes.userCancellations,
       lastActivity: this.statistics.lastActivity,
-      engineValidations: engineStats.validationCount,
-      activeRules: engineStats.activeRulesCount,
-      successRate:
-        this.statistics.totalValidations > 0
-          ? Math.round(
-              ((this.statistics.totalValidations - this.statistics.failedValidations) /
-                this.statistics.totalValidations) *
-                100,
-            )
-          : 100,
+      successRate: 100,
     };
   }
 
-  /**
-   * 重置统计数据
-   */
   resetStatistics() {
     this.statistics = {
       totalValidations: 0,
@@ -296,93 +140,51 @@ export class BackendController {
       userCancellations: 0,
       lastActivity: null,
     };
-
-    validationEngine.resetStatistics();
     fixCoordinator.resetStatistics();
-    console.log('后端统计数据已重置');
   }
 
-  /**
-   * 执行内存清理
-   */
   cleanup() {
     try {
-      // 清理消息处理器的内存
       messageHandler.cleanupProcessedMessages();
       fixCoordinator.cleanup();
-
-      console.log('后端内存清理完成');
     } catch (error) {
-      console.error('后端内存清理失败:', error);
+      console.error('[Response Linter] 后端内存清理失败:', error);
     }
   }
 
-  /**
-   * 绑定事件处理器
-   * @private
-   */
   _bindEventHandlers() {
-    // 监听消息处理事件
     document.addEventListener('responseLinter.messageProcessed', event => {
       this._handleMessageProcessed(event.detail);
     });
   }
 
-  /**
-   * 处理消息已处理事件
-   * @private
-   * @param {Object} messageData - 消息数据
-   */
   async _handleMessageProcessed(messageData) {
     try {
       const settings = this._getCurrentSettings();
-      // 进行验证
-      const result = validationEngine.validateMessage(messageData.content, messageData.messageId);
-
-      if (settings.enabled && settings.autoFix) {
-        const needsPlan = (result && !result.isValid) || hasEnabledFeature(settings);
-        if (needsPlan) {
-          // 一旦统一规划器接管本次 autoFix 事件，无论成功、失败、被抑制（流式）
-          // 还是结构歧义，都必须标记 handled，避免 validationFailed 再落到旧协调器
-          // 路径重复入队或绕过结构清理的安全闸。
-          if (result && !result.isValid) {
-            result.metadata = { ...(result.metadata || {}), handledByRepairPlan: true };
-          }
-          const plan = buildRepairPlan({
-            messageId: messageData.messageId,
-            settings,
-            validation: result,
-          });
-          if (plan.success) {
-            this._enqueueAutoPlan(plan);
-          } else if (!plan.suppressed && plan.warnings?.length) {
-            this._dispatchFixWarning(messageData.messageId, plan.warnings, plan.content);
-          }
-        }
-      }
-
-      if (result) {
-        this._handleValidationResult(result, messageData);
+      if (settings.enabled !== true || settings.autoFix !== true) return;
+      if (!hasEnabledFeature(settings)) return;
+      const plan = buildRepairPlan({
+        messageId: messageData.messageId,
+        settings,
+        ctx: __getCtx(),
+      });
+      if (plan.success) {
+        this._enqueueAutoPlan(plan);
+      } else if (!plan.suppressed && plan.warnings?.length) {
+        this._dispatchFixWarning(messageData.messageId, plan.warnings, plan.content);
       }
     } catch (error) {
-      console.error('处理消息验证失败:', error, messageData);
+      console.error('[Response Linter] 处理自动修复失败:', error, messageData);
     }
   }
 
   _enqueueAutoPlan(plan) {
     if (!plan?.success) return;
     const key = `${plan.messageId}|${plan.swipeId}|${plan.content}|${plan.fixedContent}`;
-    if (this._autoPlanKeys.get(String(plan.messageId)) === key) {
-      console.debug('[Response Linter] 跳过重复的自动修复计划', { messageId: plan.messageId });
-      return;
-    }
+    if (this._autoPlanKeys.get(String(plan.messageId)) === key) return;
     this._autoPlanKeys.set(String(plan.messageId), key);
     const pending = fixCoordinator.queueRepairPlan(plan, { priority: 60 });
-    Promise.resolve(pending).then(() => {
-      if (this._autoPlanKeys.get(String(plan.messageId)) === key) {
-        this._autoPlanKeys.delete(String(plan.messageId));
-      }
-    }).catch(() => {
+    Promise.resolve(pending).finally(() => {
       if (this._autoPlanKeys.get(String(plan.messageId)) === key) {
         this._autoPlanKeys.delete(String(plan.messageId));
       }
@@ -392,144 +194,50 @@ export class BackendController {
   _dispatchFixWarning(messageId, warnings, content = '') {
     if (!Array.isArray(warnings) || !warnings.length) return;
     const key = `${messageId}|${String(content)}|${warnings.join('|')}`;
-    if (this._warningKeys?.get(String(messageId)) === key) return;
-    this._warningKeys = this._warningKeys || new Map();
+    if (this._warningKeys.get(String(messageId)) === key) return;
     this._warningKeys.set(String(messageId), key);
-    this._dispatchFixEvent?.('fixWarning', { messageId, warnings });
+    this._dispatchFixEvent('fixWarning', { messageId, warnings });
   }
 
-  /**
-   * 处理验证结果
-   * @private
-   * @param {Object} result - 验证结果
-   * @param {Object} messageData - 消息数据
-   */
-  _handleValidationResult(result, messageData) {
-    // 更新统计
-    this.statistics.totalValidations++;
-    this.statistics.lastActivity = new Date();
-
-    if (result.isValid) {
-      console.log('验证通过:', messageData.messageId);
-      this._dispatchValidationEvent('validationPassed', result, messageData);
-    } else {
-      console.log('验证失败:', result);
-      this.statistics.failedValidations++;
-      this._dispatchValidationEvent('validationFailed', result, messageData);
-    }
-
-    // 更新UI统计显示
-    this._updateUIStatistics();
-  }
-
-  /**
-   * 更新UI统计显示
-   * @private
-   */
-  _updateUIStatistics() {
-    try {
-      const settings = extension_settings[this.extensionName];
-      if (settings && settings.statistics) {
-        const stats = this.getStatistics();
-        settings.statistics.validations = stats.totalValidations;
-        settings.statistics.fixes = stats.successfulFixes;
-        settings.statistics.successRate = stats.successRate;
-        settings.statistics.fixAttempts = stats.totalFixAttempts;
-        settings.statistics.cancellations = stats.userCancellations;
-      }
-    } catch (error) {
-      console.error('更新UI统计失败:', error);
-    }
-  }
-
-  /**
-   * 分发验证事件
-   * @private
-   * @param {string} eventType - 事件类型
-   * @param {Object} result - 验证结果
-   * @param {Object} messageData - 消息数据
-   */
-  _dispatchValidationEvent(eventType, result, messageData) {
-    try {
-      const event = new CustomEvent(`responseLinter.${eventType}`, {
-        detail: {
-          result,
-          messageData,
-          timestamp: new Date(),
-        },
-      });
-
-      document.dispatchEvent(event);
-    } catch (error) {
-      console.error('分发验证事件失败:', error);
-    }
-  }
-
-  /**
-   * 分发结构清理相关事件（警告等）
-   * @private
-   */
   _dispatchFixEvent(eventType, data) {
     try {
       document.dispatchEvent(new CustomEvent(`responseLinter.${eventType}`, {
         detail: { ...(data || {}), timestamp: new Date() },
       }));
     } catch (error) {
-      console.error('分发修复事件失败:', error);
+      console.error('[Response Linter] 分发修复事件失败:', error);
     }
   }
 
-  /**
-   * 分发状态事件
-   * @private
-   * @param {string} eventType - 事件类型
-   */
   _dispatchStatusEvent(eventType) {
     try {
-      const event = new CustomEvent(`responseLinter.${eventType}`, {
-        detail: {
-          timestamp: new Date(),
-          status: this.getStatus(),
-        },
-      });
-
-      document.dispatchEvent(event);
+      document.dispatchEvent(new CustomEvent(`responseLinter.${eventType}`, {
+        detail: { timestamp: new Date(), status: this.getStatus() },
+      }));
     } catch (error) {
-      console.error('分发状态事件失败:', error);
+      console.error('[Response Linter] 分发状态事件失败:', error);
     }
   }
 
-  // ============ 修复功能API ============
-
-  /**
-   * 手动触发消息修复
-   * @param {string} messageId - 消息ID
-   * @param {string} strategy - 修复策略（可选）
-   * @returns {Promise<Object>} 修复结果
-   */
-  async triggerManualFix(messageId, strategy = null) {
+  async triggerManualFix(messageId) {
     try {
       if (!fixCoordinator.isEnabled) return { success: false, reason: '扩展未启用' };
       const settings = this._getCurrentSettings();
       const plan = buildRepairPlan({
         messageId,
         settings,
-        ruleStrategyOverride: strategy,
-        preview: true,
+        ctx: __getCtx(),
       });
       if (!plan.success) {
-        this._updateUIStatistics();
         return {
           success: false,
           reason: plan.reason || '没有可修复的问题',
           warnings: plan.warnings || [],
+          suppressed: plan.suppressed === true,
           calendarResult: plan.calendarResult || null,
         };
       }
-
       const result = await fixCoordinator.queueRepairPlan(plan, { manual: true, priority: 100 });
-      this._updateUIStatistics();
-      if (result?.success) return { ...result, warnings: plan.warnings || [] };
       return {
         ...result,
         warnings: plan.warnings || [],
@@ -541,46 +249,24 @@ export class BackendController {
     }
   }
 
-  /**
-   * 确认修复操作
-   * @param {string} messageId - 消息ID
-   * @param {boolean} confirmed - 是否确认修复
-   * @returns {Promise<Object>} 确认结果
-   */
   async confirmFix(messageId, confirmed) {
     try {
-      const result = await fixCoordinator.confirmFix(messageId, confirmed);
-
-      this._updateUIStatistics();
-      return result;
+      return await fixCoordinator.confirmFix(messageId, confirmed);
     } catch (error) {
       console.error('确认修复失败:', error);
       return { success: false, reason: '确认过程出错', error: error.message };
     }
   }
 
-  /**
-   * 预览修复（不落地、不触发确认），用于配置向导测试
-   * @param {string} content 原始内容
-   * @param {Array<string>} missingItems 缺失项
-   * @param {string|null} strategy 策略（可选，为空则尝试所有策略）
-   * @returns {{success:boolean, newContent:string, strategy:string|null, reason?:string}}
-   */
-  previewFix(content, missingItems = [], strategy = null, rule = null) {
-    const previousEnabled = autoFixEngine.isEnabled;
-    window.ResponseLinter = window.ResponseLinter || {};
-    const previousRule = window.ResponseLinter.CurrentRule;
-    try {
-      if (!content || typeof content !== 'string') return { success: false, reason: '无效内容' };
-      if (rule) window.ResponseLinter.CurrentRule = rule;
-      autoFixEngine.setEnabled(true);
-      const result = autoFixEngine.attemptFix(content, missingItems, strategy);
-      return { success: result.success, newContent: result.fixedContent, strategy: result.strategy,
-        reason: result.metadata?.reason };
-    } finally {
-      autoFixEngine.setEnabled(previousEnabled);
-      window.ResponseLinter.CurrentRule = previousRule;
-    }
+  // Compatibility method: generic strategy preview is gone. It intentionally
+  // returns a failure without touching content or any engine state.
+  previewFix() {
+    return {
+      success: false,
+      reason: '1.4.10 已移除通用规则修复策略，请使用“修复最新回复”预览。',
+      newContent: '',
+      strategy: null,
+    };
   }
 
   getLatestAIMessage() { return messageHandler.getLatestAIMessage(); }
@@ -592,7 +278,7 @@ export class BackendController {
     const plan = buildRepairPlan({
       messageId: latest.id,
       settings,
-      preview: true,
+      ctx: __getCtx(),
     });
     if (!plan.success) {
       return {
@@ -616,91 +302,44 @@ export class BackendController {
     };
   }
 
-/**
-   * 撤销修复操作
-   * @param {string} messageId - 消息ID
-   * @param {number} steps - 撤销步数，默认1
-   * @returns {Promise<Object>} 撤销结果
-   */
   async undoFix(messageId, steps = 1) {
     try {
-      const result = await fixCoordinator.undoFix(messageId, steps);
-
-      // 更新统计（撤销不影响成功修复计数）
-      this._updateUIStatistics();
-      return result;
+      return await fixCoordinator.undoFix(messageId, steps);
     } catch (error) {
       console.error('撤销修复失败:', error);
       return { success: false, reason: '撤销过程出错', error: error.message };
     }
   }
 
-  /**
-   * 获取消息的修复历史
-   * @param {string} messageId - 消息ID
-   * @returns {Array<Object>} 修复历史记录
-   */
   getFixHistory(messageId) {
-    try {
-      // 通过fixCoordinator获取修改历史
-      return fixCoordinator.getModificationHistory ? fixCoordinator.getModificationHistory(messageId) : [];
-    } catch (error) {
-      console.error('获取修复历史失败:', error);
-      return [];
-    }
+    try { return fixCoordinator.getModificationHistory(messageId); }
+    catch { return []; }
   }
 
-  /**
-   * 检查消息是否可以撤销修复
-   * @param {string} messageId - 消息ID
-   * @returns {boolean} 是否可以撤销
-   */
   canUndoFix(messageId) {
-    try {
-      return fixCoordinator.canUndo ? fixCoordinator.canUndo(messageId) : false;
-    } catch (error) {
-      console.error('检查撤销状态失败:', error);
-      return false;
-    }
+    try { return fixCoordinator.canUndo(messageId); }
+    catch { return false; }
   }
 
-  /**
-   * 获取修复相关的统计信息
-   * @returns {Object} 修复统计数据
-   */
   getFixStatistics() {
     try {
-      const coordinatorStats = fixCoordinator.getStatistics();
+      const stats = fixCoordinator.getStatistics();
       return {
-        totalAttempts: coordinatorStats.totalTasks,
-        successfulFixes: coordinatorStats.successfulFixes,
-        userCancellations: coordinatorStats.userCancellations,
-        queueLength: coordinatorStats.queueLength || 0,
-        isProcessing: coordinatorStats.isProcessing || false,
-        successRate:
-          coordinatorStats.totalTasks > 0
-            ? Math.round((coordinatorStats.successfulFixes / coordinatorStats.totalTasks) * 100)
-            : 0,
+        totalAttempts: stats.totalTasks,
+        successfulFixes: stats.successfulFixes,
+        userCancellations: stats.userCancellations,
+        queueLength: stats.queueLength || 0,
+        isProcessing: stats.isProcessing || false,
+        successRate: stats.totalTasks > 0
+          ? Math.round((stats.successfulFixes / stats.totalTasks) * 100)
+          : 0,
       };
-    } catch (error) {
-      console.error('获取修复统计失败:', error);
-      return {
-        totalAttempts: 0,
-        successfulFixes: 0,
-        userCancellations: 0,
-        queueLength: 0,
-        isProcessing: false,
-        successRate: 0,
-      };
+    } catch {
+      return { totalAttempts: 0, successfulFixes: 0, userCancellations: 0, queueLength: 0, isProcessing: false, successRate: 0 };
     }
   }
 }
 
-/**
- * 创建后端控制器实例
- * @param {string} extensionName - 扩展名称
- * @returns {BackendController} 控制器实例
- */
 export function createBackendController(extensionName) {
   return new BackendController(extensionName);
 }

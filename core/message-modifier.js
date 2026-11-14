@@ -68,6 +68,11 @@ export class MessageModifier {
       };
     }
 
+    // Never replace a plan while its preview is still awaiting a decision.
+    if (this.pendingModifications.size) {
+      return { success: false, messageId, metadata: { reason: '请先确认或取消当前修复预览' } };
+    }
+
     try {
       // 获取当前消息内容
       const currentMessage = this._getMessage(messageId);

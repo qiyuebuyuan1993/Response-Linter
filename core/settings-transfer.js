@@ -7,11 +7,24 @@ import {
 } from './calendar-engine.js';
 import { FEATURE_DEFAULTS, readFeatureSettings } from './feature-settings.js';
 import {
+  LEGACY_PROFILE_ID,
   MAX_PROFILES,
+  STRUCTURE_PROFILES_MIGRATION_KEY,
+  STRUCTURE_PROFILES_MIGRATION_VERSION,
   STRUCTURE_PROFILES_VERSION,
+  createEditableLegacyProfile,
+  materializeLegacyProfile,
   readStructureProfiles,
   validateStructureProfile,
 } from './structure-profiles.js';
+import {
+  LEGACY_RULES_BACKUP_KEY,
+  archiveLegacyRules,
+  createLegacyRulesBackup,
+  mergeLegacyRulesBackup,
+  readLegacyRulesBackup,
+  validateLegacyRulesBackup,
+} from './legacy-rules.js';
 
 export const STRUCTURE_SETTINGS_FORMAT = 'response-linter-structure-settings';
 export const STRUCTURE_SETTINGS_VERSION = 1;
@@ -88,6 +101,17 @@ function hasForbiddenKey(value, depth = 0, seen = new WeakSet()) {
   return false;
 }
 
+function editableProfileFor110(item, settings = {}) {
+  const result = validateStructureProfile(item);
+  if (!result.ok) return result;
+  if (result.profile.id === LEGACY_PROFILE_ID && result.profile.builtin === true) {
+    return validateStructureProfile(materializeLegacyProfile(result.profile, settings), {
+      fallbackId: LEGACY_PROFILE_ID,
+    });
+  }
+  return result;
+}
+
 function profileFieldsForExport(input) {
   const collection = readStructureProfiles(input);
   if (!Array.isArray(collection.profiles) || !collection.profiles.length) {
@@ -96,7 +120,7 @@ function profileFieldsForExport(input) {
   const checked = [];
   const ids = new Set();
   for (const item of collection.profiles) {
-    const result = validateStructureProfile(item);
+    const result = editableProfileFor110(item, input);
     if (!result.ok) throw new Error(`结构配置档案无效：${result.error}`);
     if (ids.has(result.profile.id)) throw new Error(`结构配置档案 id 重复：「${result.profile.id}」`);
     ids.add(result.profile.id);
@@ -111,12 +135,19 @@ function profileFieldsForExport(input) {
   };
 }
 
-function parseImportedProfiles(parsed, previousCollection) {
+function parseImportedProfiles(parsed, previousCollection, legacySettings = {}) {
   if (!hasAnyKey(parsed, ['structureProfiles', 'structureProfileId', 'structureProfilesVersion'])) {
+    const normalized = previousCollection.profiles.map(item => {
+      const result = editableProfileFor110(item, legacySettings);
+      return result.ok ? result.profile : item;
+    });
+    const active = normalized.some(profile => profile.id === previousCollection.activeProfileId)
+      ? previousCollection.activeProfileId
+      : (normalized[0]?.id || createEditableLegacyProfile(legacySettings).id);
     return {
       structureProfilesVersion: previousCollection.version,
-      structureProfiles: previousCollection.profiles,
-      structureProfileId: previousCollection.activeProfileId,
+      structureProfiles: normalized,
+      structureProfileId: active,
     };
   }
   if (parsed.structureProfilesVersion != null) {
@@ -135,7 +166,7 @@ function parseImportedProfiles(parsed, previousCollection) {
   const ids = new Set();
   const names = new Set();
   for (const item of parsed.structureProfiles) {
-    const result = validateStructureProfile(item);
+    const result = editableProfileFor110(item, legacySettings);
     if (!result.ok) throw new Error(`结构配置档案无效：${result.error}`);
     if (ids.has(result.profile.id)) throw new Error(`结构配置档案 id 重复：「${result.profile.id}」`);
     if (names.has(result.profile.name)) throw new Error(`结构配置档案名称重复：「${result.profile.name}」`);
@@ -160,6 +191,27 @@ function safePreviousSource(value) {
   try { return sourceOf(value, 'gouhua'); } catch { return 'gouhua'; }
 }
 
+/**
+ * Imported legacy rules are data only and are never returned as active rules.
+ * An existing local backup always wins; imported old rules are archived only
+ * when no earlier backup exists.
+ */
+function importedLegacyRulesFields(previousSettings, parsed) {
+  let importedBackup = null;
+  if (parsed.legacyRulesBackup != null) {
+    const checked = validateLegacyRulesBackup(parsed.legacyRulesBackup);
+    if (!checked.ok) throw new Error(`旧版规则备份无效：${checked.error}`);
+    importedBackup = checked.backup;
+  } else if (Array.isArray(parsed.rules) && parsed.rules.length) {
+    importedBackup = createLegacyRulesBackup(parsed.rules, {
+      note: 'Imported 1.4.9-or-earlier rules. Archived for reference only; never executed.',
+    });
+  }
+  const merged = mergeLegacyRulesBackup(previousSettings, importedBackup);
+  if (merged.error) throw new Error(`旧版规则备份无效：${merged.error}`);
+  return merged.backup ? { legacyRulesBackup: merged.backup } : {};
+}
+
 export function createStructureSettingsExport(input = {}) {
   const source = sourceOf(input.sdcCalendarSource, 'gouhua');
   const custom = customOf(input.sdcCustomCalendarJson);
@@ -176,19 +228,24 @@ export function createStructureSettingsExport(input = {}) {
   );
   validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
   const profileFields = profileFieldsForExport(input);
+  const backup = readLegacyRulesBackup(input)
+    || archiveLegacyRules(input).fields[LEGACY_RULES_BACKUP_KEY]
+    || null;
   return {
     format: STRUCTURE_SETTINGS_FORMAT,
     version: STRUCTURE_SETTINGS_VERSION,
     ...profileFields,
+    ...(backup ? { legacyRulesBackup: backup } : {}),
     removeLeakedReasoning: input.removeLeakedReasoning === true,
     repairSdcBoundary: input.repairSdcBoundary === true,
     repairDetailsOrder: input.repairDetailsOrder === true,
     detailsMonologueKeyword,
     detailsChoicesKeyword,
     sdcCalendarSource: source,
-    // 保留用户原始合法 JSON，不能把校验时补出的 advanceMinutes 等默认值写回去。
+    // 保留用户原始合法 JSON，不能把校验过程中补出的 advanceMinutes 等默认值写回去。
     sdcCustomCalendarJson: custom.text || '',
     sdcAdvanceMinutes: advanceOf(input.sdcAdvanceMinutes),
+    // The new export never carries an active executable `rules` array.
   };
 }
 
@@ -219,12 +276,20 @@ export function importStructureSettingsText(text, previous = {}) {
       const directAdvance = parsed.advanceMinutes == null
         ? previousAdvance
         : advanceOf(parsed.advanceMinutes, previousAdvance, { strictType: true });
+      const normalizedPreviousProfiles = previousProfiles.profiles.map(item => {
+        const result = editableProfileFor110(item, previousValid);
+        return result.ok ? result.profile : item;
+      });
       return {
         ok: true,
         settings: {
           structureProfilesVersion: previousProfiles.version,
-          structureProfiles: previousProfiles.profiles,
-          structureProfileId: previousProfiles.activeProfileId,
+          structureProfiles: normalizedPreviousProfiles,
+          structureProfileId: normalizedPreviousProfiles.some(profile => profile.id === previousProfiles.activeProfileId)
+            ? previousProfiles.activeProfileId
+            : (normalizedPreviousProfiles[0]?.id || LEGACY_PROFILE_ID),
+          [STRUCTURE_PROFILES_MIGRATION_KEY]: STRUCTURE_PROFILES_MIGRATION_VERSION,
+          ...importedLegacyRulesFields(previousFeatures, parsed),
           removeLeakedReasoning: previousValid.removeLeakedReasoning,
           repairSdcBoundary: previousValid.repairSdcBoundary,
           repairDetailsOrder: previousValid.repairDetailsOrder,
@@ -253,6 +318,7 @@ export function importStructureSettingsText(text, previous = {}) {
       'detailsMonologueKeyword', 'detailsChoicesKeyword',
       'sdcCalendarSource', 'sdcCustomCalendarJson', 'sdcAdvanceMinutes',
       'structureProfiles', 'structureProfileId', 'structureProfilesVersion',
+      'legacyRulesBackup',
     ])) {
       return { ok: false, error: '配置为空或缺少可导入的结构清理/历法/折叠块字段' };
     }
@@ -292,12 +358,19 @@ export function importStructureSettingsText(text, previous = {}) {
       '“你的选择是”标题关键词',
     );
     validateKeywordPair(detailsMonologueKeyword, detailsChoicesKeyword);
-    const profileFields = parseImportedProfiles(parsed, previousProfiles);
+    const profileFields = parseImportedProfiles(parsed, previousProfiles, {
+      ...previousFeatures,
+      detailsMonologueKeyword,
+      detailsChoicesKeyword,
+    });
+    const backupFields = importedLegacyRulesFields(previousFeatures, parsed);
 
     return {
       ok: true,
       settings: {
         ...profileFields,
+        [STRUCTURE_PROFILES_MIGRATION_KEY]: STRUCTURE_PROFILES_MIGRATION_VERSION,
+        ...backupFields,
         removeLeakedReasoning: typeof parsed.removeLeakedReasoning === 'boolean'
           ? parsed.removeLeakedReasoning
           : previousValid.removeLeakedReasoning,

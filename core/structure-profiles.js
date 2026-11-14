@@ -8,6 +8,8 @@ import {
 } from './details-repair.js';
 
 export const STRUCTURE_PROFILES_VERSION = 1;
+export const STRUCTURE_PROFILES_MIGRATION_KEY = 'structureProfilesMigrationVersion';
+export const STRUCTURE_PROFILES_MIGRATION_VERSION = 1;
 export const LEGACY_PROFILE_ID = 'legacy-sdc-content-details';
 export const LEGACY_PROFILE_NAME = '旧版 SDC / content / details';
 export const MAX_PROFILES = 40;
@@ -224,6 +226,37 @@ export function createLegacyProfile(settings = {}) {
 }
 
 /**
+ * 1.4.10 migration target: the old preset becomes an ordinary editable profile.
+ * The old keyword fields were the effective source of its title keywords, so
+ * they are copied into the blocks instead of remaining separate global editors.
+ * The canonical semantic order (monologue before choices) is preserved.
+ */
+export function createEditableLegacyProfile(settings = {}) {
+  const preset = createLegacyProfile(settings);
+  return {
+    ...preset,
+    builtin: false,
+    blocks: preset.blocks.map(block => ({ ...block })),
+  };
+}
+
+export function materializeLegacyProfile(profile, settings = {}) {
+  const preset = createEditableLegacyProfile(settings);
+  const source = isPlainObject(profile) ? profile : {};
+  const existing = Array.isArray(source.blocks) ? source.blocks : [];
+  const extraBlocks = existing.filter(block => block && block.id !== 'monologue' && block.id !== 'choices');
+  return {
+    ...preset,
+    revision: Number.isInteger(source.revision) && source.revision > 0 ? source.revision : preset.revision,
+    id: safeId(source.id) || LEGACY_PROFILE_ID,
+    name: typeof source.name === 'string' && source.name.trim() ? source.name.trim().slice(0, MAX_PROFILE_NAME) : LEGACY_PROFILE_NAME,
+    // Extra blocks from unusual old imports are preserved, after the canonical
+    // monologue/choices pair, rather than silently discarded.
+    blocks: [...preset.blocks.map(block => ({ ...block })), ...extraBlocks.map(block => ({ ...block }))],
+  };
+}
+
+/**
  * Strict descriptor normalization used by edits and imports.
  */
 export function validateStructureProfile(input, { fallbackId = '', allowMissingId = false } = {}) {
@@ -431,17 +464,18 @@ export function validateStructureProfile(input, { fallbackId = '', allowMissingI
  */
 export function readStructureProfiles(settings = {}) {
   const raw = isPlainObject(settings) ? settings : {};
-  const legacyProfile = createLegacyProfile(raw);
+  const legacyPreset = createLegacyProfile(raw);
+  const editableDefault = createEditableLegacyProfile(raw);
   const hasProfiles = Array.isArray(raw.structureProfiles) && raw.structureProfiles.length > 0;
   const warnings = [];
 
   if (!hasProfiles) {
     return {
       version: STRUCTURE_PROFILES_VERSION,
-      profiles: [legacyProfile],
+      profiles: [editableDefault],
       activeProfileId: LEGACY_PROFILE_ID,
-      activeProfile: legacyProfile,
-      legacyProfile,
+      activeProfile: editableDefault,
+      legacyProfile: editableDefault,
       migrated: true,
       warnings,
     };
@@ -452,10 +486,10 @@ export function readStructureProfiles(settings = {}) {
     warnings.push(`不支持的结构配置档案版本 ${String(raw.structureProfilesVersion)}，已使用旧版预设。`);
     return {
       version: STRUCTURE_PROFILES_VERSION,
-      profiles: [legacyProfile],
+      profiles: [editableDefault],
       activeProfileId: LEGACY_PROFILE_ID,
-      activeProfile: legacyProfile,
-      legacyProfile,
+      activeProfile: editableDefault,
+      legacyProfile: editableDefault,
       migrated: false,
       invalid: true,
       warnings,
@@ -487,33 +521,35 @@ export function readStructureProfiles(settings = {}) {
     profiles.push(result.profile);
   }
   if (!profiles.length) {
-    warnings.push('没有有效的结构配置档案，已回退到旧版预设。');
-    profiles.push(legacyProfile);
+    warnings.push('没有有效的结构配置档案，已回退到可编辑的旧版配置。');
+    profiles.push(editableDefault);
   }
 
-  // The legacy preset remains tied to the old keyword fields. This keeps the
-  // 1.4.6/1.4.7 keyword controls meaningful after migration.
+  // Old built-in presets still derive their title keywords from the former
+  // top-level fields, matching their runtime behavior before 1.4.10. Once
+  // migrated (builtin=false), the profile's own block values and order are
+  // authoritative so the separate keyword editors are no longer involved.
   const existingLegacy = profiles.find(profile => profile.id === LEGACY_PROFILE_ID);
-  let effectiveLegacy = legacyProfile;
-  if (existingLegacy) {
+  let effectiveLegacy = existingLegacy || editableDefault;
+  if (existingLegacy && existingLegacy.builtin === true) {
     effectiveLegacy = validateStructureProfile({
       ...existingLegacy,
-      body: legacyProfile.body,
-      time: legacyProfile.time,
-      auxiliaries: legacyProfile.auxiliaries,
+      body: legacyPreset.body,
+      time: legacyPreset.time,
+      auxiliaries: legacyPreset.auxiliaries,
       blocks: existingLegacy.blocks.map(block => {
-        if (block.id === 'monologue') return { ...block, titleKeyword: legacyProfile.blocks[0].titleKeyword };
-        if (block.id === 'choices') return { ...block, titleKeyword: legacyProfile.blocks[1].titleKeyword };
+        if (block.id === 'monologue') return { ...block, titleKeyword: legacyPreset.blocks[0].titleKeyword };
+        if (block.id === 'choices') return { ...block, titleKeyword: legacyPreset.blocks[1].titleKeyword };
         return block;
       }),
-    }, { fallbackId: LEGACY_PROFILE_ID }).profile || legacyProfile;
+    }, { fallbackId: LEGACY_PROFILE_ID }).profile || editableDefault;
   }
 
   const effectiveProfiles = profiles.map(profile => profile.id === LEGACY_PROFILE_ID ? effectiveLegacy : profile);
   const wanted = typeof raw.structureProfileId === 'string' ? raw.structureProfileId : '';
   let activeProfile = effectiveProfiles.find(profile => profile.id === wanted) || null;
   if (!activeProfile) activeProfile = effectiveProfiles.find(profile => profile.id === LEGACY_PROFILE_ID) || effectiveProfiles[0];
-  if (!activeProfile) activeProfile = legacyProfile;
+  if (!activeProfile) activeProfile = editableDefault;
   if (wanted && activeProfile.id !== wanted) {
     warnings.push('当前选中的结构配置档案已失效，已回退到可用档案。');
   }
@@ -584,7 +620,11 @@ export function mergeStructureProfiles(previousRaw, uiValues = {}) {
     }
     ids.add(result.profile.id);
     names.add(result.profile.name);
-    checked.push(result.profile);
+    // The old built-in profile is now an ordinary editable profile. Saving a
+    // stale copy that still says builtin must not restore the read-only state.
+    checked.push(result.profile.id === LEGACY_PROFILE_ID
+      ? { ...result.profile, builtin: false }
+      : result.profile);
   }
   const wanted = typeof uiValues.structureProfileId === 'string' ? uiValues.structureProfileId.trim() : '';
   const active = checked.find(profile => profile.id === wanted);
@@ -609,18 +649,44 @@ export function mergeStructureProfiles(previousRaw, uiValues = {}) {
 
 /**
  * Derive and attach profile fields for old settings without touching any other
- * field. Returns migrated=false when a valid collection/active id already exists.
+ * field. The migration is one-way and idempotent:
+ * - the old built-in preset becomes an ordinary editable profile;
+ * - its effective title keywords move into the profile blocks;
+ * - the selected profile id and all unrelated flags are preserved;
+ * - once `structureProfilesMigrationVersion` is present no profile is rewritten.
  */
 export function migrateStructureProfileSettings(settings = {}) {
   const raw = isPlainObject(settings) ? settings : {};
   const collection = readStructureProfiles(raw);
-  const hasValidProfiles = Array.isArray(raw.structureProfiles) && raw.structureProfiles.length > 0 && !collection.migrated;
+  const hasStoredProfiles = Array.isArray(raw.structureProfiles) && raw.structureProfiles.length > 0;
+  const migrationVersion = Number(raw[STRUCTURE_PROFILES_MIGRATION_KEY]);
+  const migrationNeeded = !Number.isInteger(migrationVersion) ||
+    migrationVersion < STRUCTURE_PROFILES_MIGRATION_VERSION;
   const fields = {};
   let migrated = false;
-  if (!hasValidProfiles) {
-    fields.structureProfilesVersion = collection.version;
-    fields.structureProfiles = collection.profiles;
-    fields.structureProfileId = collection.activeProfileId;
+
+  if (migrationNeeded || !hasStoredProfiles) {
+    let profiles;
+    if (!hasStoredProfiles) {
+      profiles = [createEditableLegacyProfile(raw)];
+    } else {
+      profiles = collection.profiles.map(profile => {
+        if (profile.id !== LEGACY_PROFILE_ID || profile.builtin !== true) return profile;
+        const checked = validateStructureProfile(materializeLegacyProfile(profile, raw), {
+          fallbackId: LEGACY_PROFILE_ID,
+        });
+        return checked.ok ? checked.profile : createEditableLegacyProfile(raw);
+      });
+    }
+    const wanted = typeof raw.structureProfileId === 'string' ? raw.structureProfileId : '';
+    const active = profiles.find(profile => profile.id === wanted)
+      || profiles.find(profile => profile.id === collection.activeProfileId)
+      || profiles.find(profile => profile.id === LEGACY_PROFILE_ID)
+      || profiles[0];
+    fields.structureProfilesVersion = STRUCTURE_PROFILES_VERSION;
+    fields.structureProfiles = profiles;
+    fields.structureProfileId = active.id;
+    fields[STRUCTURE_PROFILES_MIGRATION_KEY] = STRUCTURE_PROFILES_MIGRATION_VERSION;
     migrated = true;
   } else {
     if (raw.structureProfilesVersion == null) {
@@ -633,7 +699,10 @@ export function migrateStructureProfileSettings(settings = {}) {
       migrated = true;
     }
   }
-  return { fields, migrated, collection };
+  const effectiveCollection = fields.structureProfiles
+    ? { ...collection, profiles: fields.structureProfiles, activeProfileId: fields.structureProfileId }
+    : collection;
+  return { fields, migrated, collection: effectiveCollection };
 }
 
 export function cloneProfile(profile, { id, name, builtin = false } = {}) {
