@@ -1721,12 +1721,9 @@ body.rl-modal-open { overflow: hidden !important; }
   max-width: 210px;
 }
 
-#rl-wand-button {
-  cursor: pointer;
-}
-
-#rl-wand-button.rl-wand-active {
-  color: var(--SmartThemeEmColor);
+#rl-wand-button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
 }
 
 .rl-main-panel-overlay {

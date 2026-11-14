@@ -4,7 +4,7 @@
 
 一个强大的 SillyTavern 扩展，用于实时监控和智能修复 AI 回复格式。
 
-![版本](https://img.shields.io/badge/版本-1.4.8-blue.svg)
+![版本](https://img.shields.io/badge/版本-1.4.9-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue.svg)
 ![SillyTavern](https://img.shields.io/badge/SillyTavern-兼容-brightgreen.svg)
 
@@ -65,6 +65,11 @@ Response-Linter/
 ├── 📄 README.md                      # 项目文档
 └── 📄 LICENSE                        # 许可证文件
 ```
+
+### 🆕 v1.4.9 魔法棒主题适配与中文名称
+
+- 魔法棒入口沿用酒馆原生菜单行、图标与文字结构，继承主题美化，不再套用普通按钮样式；修复图标类误用导致入口无法点击，保留键盘操作与焦点提示。
+- 扩展列表显示名称改为“响应检查器”，保留原有设置、规则及插件标识。
 
 ### 🆕 v1.4.8 结构配置档案、自动历法、wand 面板与 Quick Reply
 
