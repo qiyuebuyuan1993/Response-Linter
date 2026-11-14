@@ -1,10 +1,8 @@
 // Response Linter 修复协调器
 // 协调验证失败事件和修复执行，管理修复流程和用户交互
 
-import { autoFixEngine } from './auto-fix-engine.js';
 import { getFreshContext, isStreamingContext } from './host-context.js';
 import { messageModifier } from './message-modifier.js';
-import { validationEngine } from './validation-engine.js';
 
 /**
  * 修复任务数据结构
@@ -53,8 +51,6 @@ export class FixCoordinator {
     // 由“自动修复默认行为”决定是否需要确认：preview=需要确认；apply=直接应用
     this.requireConfirmation = (settings?.defaultAutoFixAction === 'preview');
 
-    // 启用相关服务
-    autoFixEngine.setEnabled(this.isEnabled);
     messageModifier.setEnabled(this.isEnabled);
 
     console.log(`修复协调器已初始化 - 自动修复: ${this.autoFixEnabled ? '启用' : '禁用'}，默认行为: ${this.requireConfirmation ? '预览确认' : '直接应用'}`);
@@ -70,7 +66,6 @@ export class FixCoordinator {
     this.requireConfirmation = (settings?.defaultAutoFixAction === 'preview');
 
     // 同步更新相关服务
-    autoFixEngine.setEnabled(this.isEnabled);
     messageModifier.setEnabled(this.isEnabled);
 
     console.log(`修复协调器设置已更新 - 自动修复: ${this.autoFixEnabled ? '启用' : '禁用'}，默认行为: ${this.requireConfirmation ? '预览确认' : '直接应用'}`);
@@ -81,76 +76,17 @@ export class FixCoordinator {
    * @private
    */
   _bindEventHandlers() {
-    // 监听验证失败事件
-    document.addEventListener('responseLinter.validationFailed', event => {
-      this._handleValidationFailed(event.detail);
-    });
-
-    // 监听修改确认事件
+    // 1.4.10 intentionally has no validationFailed -> generic repair listener.
+    // Only shared repair plans produced by repair-service may enter the queue.
     document.addEventListener('responseLinter.modificationConfirmationRequired', event => {
       this._handleModificationConfirmationRequired(event.detail);
     });
   }
 
-  /**
-   * 处理验证失败事件
-   * @private
-   * @param {Object} eventData - 验证失败事件数据
-   */
-  async _handleValidationFailed(eventData) {
-    if (!this.isEnabled || !this.autoFixEnabled) {
-      return;
-    }
-
-    try {
-      const { result, messageData } = eventData;
-
-      // 后端已经为同一条消息排队了合并后的修复计划（结构清理+普通规则），
-      // 这里不能再入队一次，避免双重写入或竞态。
-      if (result?.metadata?.handledByRepairPlan) {
-        return;
-      }
-
-      // 检查是否有可用的修复策略
-      if (!result.fixStrategy) {
-        console.log('验证失败但没有可用的修复策略:', result.ruleName);
-        return;
-      }
-
-      // 基于顺序错误合成“待补标签”：
-      // 例：要求 A(</Psyche_think>) 在 B(<content>) 之前，但检测到 B 提前，则把 A 当作“缺少的标签”加入修复列表
-      let _missing = Array.isArray(result.missingContent) ? [...result.missingContent] : [];
-      try {
-        if (result.errorType === 'order' && Array.isArray(result.errorDetails)) {
-          const synth = result.errorDetails
-            .filter(d => d && d.type === 'order' && typeof d.expectedAfter === 'string' && /^<\//.test(d.expectedAfter))
-            .map(d => d.expectedAfter);
-          if (synth.length) {
-            _missing = [...new Set([..._missing, ...synth])];
-          }
-        }
-      } catch {}
-
-      // 创建修复任务
-      const fixTask = {
-        messageId: messageData.messageId,
-        content: messageData.content,
-        missingItems: _missing,
-        ruleName: result.ruleName,
-        ruleId: result?.metadata?.ruleId || null,
-        fixStrategy: result.fixStrategy,
-        priority: this._calculatePriority(result),
-        createdAt: new Date(),
-        status: 'pending',
-      };
-
-      try { console.debug('[Response Linter][diag] enqueue fixTask', { id: fixTask.messageId, strat: fixTask.fixStrategy, miss: fixTask.missingItems, contentLen: (fixTask.content||'').length }); } catch {}
-
-      // 添加到修复队列
-      this._addToQueue(fixTask);
-    } catch (error) {
-      console.error('处理验证失败事件出错:', error);
-    }
+  // Compatibility no-op for older callers/events. Generic rules are never
+  // converted into a fix task.
+  async _handleValidationFailed() {
+    return;
   }
 
   /**
@@ -251,37 +187,26 @@ export class FixCoordinator {
 
       console.log(`开始处理修复任务 [${task.messageId}] - 策略: ${task.fixStrategy}`);
 
-      let fixResult;
-      if (typeof task.plannedContent === 'string') {
-        // 手动/自动/预览共用的计划：普通规则与结构清理已经合并，避免二次调用策略。
-        fixResult = {
-          success: task.plannedContent !== task.content,
-          originalContent: task.content,
-          fixedContent: task.plannedContent,
-          strategy: task.fixStrategy,
-          fixedItems: [],
-          metadata: {
-            pipeline: Array.isArray(task.strategies) ? task.strategies : [],
-            warnings: Array.isArray(task.warnings) ? task.warnings : [],
-            planned: true,
-            reason: task.plannedContent === task.content ? '内容无变化' : undefined,
-          },
-        };
-      } else {
-        // 兼容旧队列任务（例如直接调用 triggerManualFix 的旧路径）。
-        try {
-          const rule = validationEngine.activeRules.find(r => r.id === task.ruleId) || null;
-          window.ResponseLinter = window.ResponseLinter || {};
-          window.ResponseLinter.CurrentRule = rule || null;
-        } catch (e) {}
-
-        fixResult = autoFixEngine.attemptFix(task.content, task.missingItems, task.fixStrategy);
-        const rule = validationEngine.activeRules.find(r => r.id === task.ruleId);
-        if (fixResult.success && rule && !validationEngine._validateSingleRule(fixResult.fixedContent, rule, task.messageId).isValid) {
-          fixResult.success = false;
-          fixResult.metadata = { reason: '修复后仍不满足当前规则，未修改消息' };
-        }
+      if (typeof task.plannedContent !== 'string') {
+        // There is deliberately no fallback to the 1.4.9 strategy engine.
+        task.status = 'failed';
+        this.statistics.failedFixes++;
+        return { success: false, reason: '旧版通用规则修复路径已移除，请重新生成结构修复计划。' };
       }
+      // Manual/auto/preview share one already-computed plan.
+      const fixResult = {
+        success: task.plannedContent !== task.content,
+        originalContent: task.content,
+        fixedContent: task.plannedContent,
+        strategy: task.fixStrategy,
+        fixedItems: [],
+        metadata: {
+          pipeline: Array.isArray(task.strategies) ? task.strategies : [],
+          warnings: Array.isArray(task.warnings) ? task.warnings : [],
+          planned: true,
+          reason: task.plannedContent === task.content ? '内容无变化' : undefined,
+        },
+      };
 
       if (fixResult.success) {
         // 修复成功，应用到消息
@@ -499,13 +424,11 @@ export class FixCoordinator {
    * @param {string} strategy - 修复策略
    * @returns {Promise<Object>} 修复结果
    */
-  async triggerManualFix(messageId, content, missingItems, strategy, ruleId = null) {
-    if (!this.isEnabled) return { success: false, reason: '扩展未启用' };
-    if (!strategy) return { success: false, reason: '此规则未配置修复策略' };
-    return new Promise(resolve => this._addToQueue({
-      messageId, content, missingItems, ruleId, fixStrategy: strategy,
-      ruleName: 'manual', priority: 100, createdAt: new Date(), status: 'pending', resolve,
-    }));
+  async triggerManualFix() {
+    return {
+      success: false,
+      reason: '旧版通用规则手动修复已移除，请通过“修复最新回复”使用结构修复计划。',
+    };
   }
 
   /**
@@ -527,10 +450,8 @@ export class FixCoordinator {
       strategies: plan.strategies || [],
       warnings: plan.warnings || [],
       missingItems: [],
-      ruleId: plan.ruleId || null,
-      ruleName: plan.ruleName || 'structure',
       featureChanged: plan.featureChanged === true,
-      revalidate: !!plan.ruleId && plan.featureChanged !== true,
+      revalidate: false,
       fixStrategy: plan.strategy || 'structure',
       message: plan.message,
       swipeId: Number.isInteger(plan.swipeId) ? plan.swipeId : null,
@@ -553,33 +474,13 @@ export class FixCoordinator {
    * @param {FixTask} task - 修复任务
    * @returns {boolean} 是否需要重新验证
    */
-  _shouldRevalidate(task) {
-    // 计划任务若只做了普通规则修复，保留 1.4.5 的重新验证行为；
-    // 若叠加了结构清理，则可能与规则目标冲突，避免产生误导性通知。
-    if (typeof task.plannedContent === 'string') return task.revalidate === true;
-    return ['thinking-content', 'add-missing-tags'].includes(task.fixStrategy);
+  _shouldRevalidate() {
+    // Generic post-fix validation was removed with the legacy rule engine.
+    return false;
   }
 
-  /**
-   * 重新验证修复后的消息
-   * @private
-   * @param {string} messageId - 消息ID
-   * @param {string} content - 修复后的内容
-   */
-  async _revalidateMessage(messageId, content) {
-    try {
-      const revalidationResult = validationEngine.validateMessage(content, messageId);
-
-      if (revalidationResult && revalidationResult.isValid) {
-        console.log(`重新验证成功 [${messageId}] - 修复有效`);
-        this._dispatchFixEvent('revalidationPassed', { messageId, content });
-      } else {
-        console.warn(`重新验证失败 [${messageId}] - 修复可能不完整`, revalidationResult);
-        this._dispatchFixEvent('revalidationFailed', { messageId, content, result: revalidationResult });
-      }
-    } catch (error) {
-      console.error('重新验证出错:', error);
-    }
+  async _revalidateMessage() {
+    return;
   }
 
   /**
@@ -641,7 +542,6 @@ export class FixCoordinator {
     for (const task of this.fixQueue) task.resolve?.({ success: false, reason: '任务已取消' });
     this.fixQueue = [];
     messageModifier.clearHistory();
-    autoFixEngine.clearHistory();
 
     console.log('修复协调器已清理');
   }

@@ -1,4 +1,6 @@
-// Run: node --test tests/regression.mjs (Node.js 22.15+).
+// Run: node --test tests/regression.mjs (Node.js 24).
+// 1.4.10 core flow: structure-only manual/auto/preview/undo, rollback and
+// metadata preservation. Generic validation rules are intentionally absent.
 import { registerHooks } from 'node:module';
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,20 +19,50 @@ globalThis.__testContext = { chat: [], extensionSettings: {}, saveChat: async ()
 globalThis.getContext = () => globalThis.__testContext;
 globalThis.SillyTavern = { getContext };
 globalThis.ResponseLinter = {};
-const { validationEngine, ValidationEngine } = await import('../core/validation-engine.js');
-const { autoFixEngine } = await import('../core/auto-fix-engine.js');
+
 const { messageModifier } = await import('../core/message-modifier.js');
 const { messageHandler } = await import('../core/message-handler.js');
 const { fixCoordinator } = await import('../core/fix-coordinator.js');
 const { createBackendController } = await import('../core/backend-controller.js');
-const { RuleEditorUI } = await import('../presentation/modules/rule-editor-ui.js');
-const { RulesManagerUI } = await import('../presentation/modules/rules-manager-ui.js');
+const { validateStructureProfile } = await import('../core/structure-profiles.js');
 const controller = createBackendController('response-linter');
-// Listener binding isn't under test here; message processing itself is exercised below.
 controller.start = () => { controller.isRunning = true; };
-const rule = () => ({ id: 'r', name: '正文', enabled: true,
-  requiredContent: ['<content>', '</content>'], fixStrategy: 'add-missing-tags' });
+controller.stop = () => { controller.isRunning = false; };
+fixCoordinator._sleep = async () => {};
+
+const plainProfile = validateStructureProfile({
+  id: 'regression-plain',
+  name: '回归测试结构',
+  body: { open: '【正文】', close: '【/正文】' },
+  time: { mode: 'none' },
+  auxiliaries: ['【水印】'],
+  blocks: [],
+}).profile;
+
 let saves, failSave, failRender;
+function messageFixture(mes, { swipe = mes, extra = {} } = {}) {
+  return { mes, is_user: false, swipe_id: 0, swipes: [swipe], extra: { display_text: mes, ...extra } };
+}
+function waitForEvent(name, timeoutMs = 1200) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { document.removeEventListener(name, onEvent); reject(new Error(`timeout: ${name}`)); }, timeoutMs);
+    const onEvent = event => {
+      clearTimeout(timer);
+      document.removeEventListener(name, onEvent);
+      resolve(event.detail);
+    };
+    document.addEventListener(name, onEvent);
+  });
+}
+function enable(overrides = {}) {
+  controller.updateSettings({
+    enabled: true,
+    autoFix: false,
+    defaultAutoFixAction: 'apply',
+    ...overrides,
+  });
+}
+
 beforeEach(() => {
   assert.equal(fixCoordinator.fixQueue.length, 0);
   fixCoordinator.isProcessing = false;
@@ -39,25 +71,31 @@ beforeEach(() => {
   messageModifier.pendingModifications.clear();
   messageHandler.lastContent.clear();
   messageHandler.lastHandledAt.clear();
+  messageHandler.retryCounts.clear();
   messageHandler.ctxRef = null;
   saves = 0; failSave = false; failRender = false;
-  __testContext.chat = [{ mes: '<content>正文', is_user: false, swipe_id: 0, swipes: ['<content>正文'] }];
+  __testContext.chat = [messageFixture('<thinking>泄漏</thinking>\n<content>正文</content>')];
+  __testContext.chatMetadata = {};
+  __testContext.streamingProcessor = null;
+  __testContext.eventSource = { emit() { this.emitted = (this.emitted || 0) + 1; }, emitted: 0 };
   __testContext.updateMessageBlock = async id => {
-    if (failRender) throw Error('render failed');
+    if (failRender) throw new Error('render failed');
     await messageHandler._handleMessageRendered(String(id));
   };
-  __testContext.saveChat = async () => { if (failSave) throw Error('save failed'); saves++; };
-  globalThis.UIState = { rules: [rule()] };
-  ResponseLinter.CurrentRule = null;
-  controller.updateSettings({ enabled: true, autoFix: false, defaultAutoFixAction: 'apply', rules: UIState.rules });
+  __testContext.saveChat = async () => {
+    if (failSave) throw new Error('save failed');
+    saves++;
+  };
+  globalThis.UIState = { rules: [] };
   controller.resetStatistics();
+  enable({ removeLeakedReasoning: true });
 });
 
-test('manual repair works with automatic repair off, including message index zero and legacy strategy', async () => {
+test('manual structure repair works with auto repair off, including message index zero', async () => {
   const result = await controller.triggerManualFix('0');
   assert.equal(result.success, true);
   const message = __testContext.chat[0];
-  assert.equal(message.mes, '<content>正文\n</content>');
+  assert.equal(message.mes, '<content>正文</content>');
   assert.equal(message.extra.display_text, message.mes);
   assert.equal(message.swipes[0], message.mes);
   assert.equal(saves, 1);
@@ -67,46 +105,126 @@ test('manual repair works with automatic repair off, including message index zer
   assert.equal(controller.getFixStatistics().totalAttempts, 1);
 });
 
-test('manual repair reports unavailable strategy instead of reporting queue success', async () => {
-  UIState.rules[0].fixStrategy = 'unknown';
-  const result = await controller.triggerManualFix('0');
-  assert.equal(result.success, false);
+test('enabled malicious legacy rule is ignored by manual and auto repair while reasoning cleanup works', async () => {
+  let legacyExecuted = false;
+  const legacyRule = {
+    id: 'legacy-malicious',
+    name: '旧恶意规则',
+    enabled: true,
+    requiredContent: ['<content>', '</content>'],
+    fixStrategy: 'custom',
+    customStrategy: { pattern: '.*', replacement: '<broken>' },
+    execute: () => { legacyExecuted = true; },
+  };
+  __testContext.chat = [messageFixture('<thinking>泄漏</thinking>\n<content>正文')];
+  enable({ rules: [legacyRule], removeLeakedReasoning: true });
+  const manual = await controller.triggerManualFix('0');
+  assert.equal(manual.success, true);
+  assert.equal(__testContext.chat[0].mes, '<content>正文');
+  assert.equal(legacyExecuted, false);
+  assert.equal(saves, 1);
+
+  __testContext.chat = [messageFixture('<thinking>泄漏</thinking>\n<content>正文')];
+  messageHandler.lastContent.clear();
+  enable({ rules: [legacyRule], removeLeakedReasoning: true, autoFix: true });
+  const applied = waitForEvent('responseLinter.fixApplied');
+  await messageHandler._processMessage('0');
+  await applied;
+  assert.equal(__testContext.chat[0].mes, '<content>正文');
+  assert.equal(legacyExecuted, false);
+  assert.equal(saves, 2);
+});
+
+test('no enabled structure feature causes no mutation even with auto repair and a legacy rule', async () => {
+  let executed = false;
+  const legacyRule = { id: 'evil', enabled: true, requiredContent: ['</content>'], execute: () => { executed = true; } };
+  __testContext.chat = [messageFixture('<content>正文')];
+  enable({ rules: [legacyRule], removeLeakedReasoning: false, repairSdcBoundary: false, repairDetailsOrder: false, autoFix: true });
+  const before = structuredClone(__testContext.chat[0]);
+  const manual = await controller.triggerManualFix('0');
+  assert.equal(manual.success, false);
+  assert.match(manual.reason, /未启用/);
+  await controller._handleMessageProcessed({ messageId: '0', content: '<content>正文', name: 'AI' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.deepEqual(__testContext.chat[0], before);
   assert.equal(saves, 0);
+  assert.equal(executed, false);
+  assert.equal(fixCoordinator.fixQueue.length, 0);
+});
+
+test('preview confirmation does not write early and refuses edits or chat switches', async () => {
+  enable({ removeLeakedReasoning: true, defaultAutoFixAction: 'preview' });
+  const pending = await controller.triggerManualFix('0');
+  assert.equal(pending.metadata.requiresConfirmation, true);
+  assert.equal(saves, 0);
+  __testContext.chat[0].mes += ' edited';
+  __testContext.chat[0].extra.display_text = __testContext.chat[0].mes;
+  __testContext.chat[0].swipes[0] = __testContext.chat[0].mes;
+  assert.equal((await controller.confirmFix('0', true)).success, false);
+  assert.equal(saves, 0);
+
+  __testContext.chat = [messageFixture('<thinking>泄漏</thinking>\n<content>正文</content>')];
+  await controller.triggerManualFix('0');
+  __testContext.chat = [messageFixture('<content>other chat')];
+  assert.equal((await controller.confirmFix('0', true)).success, false);
+  assert.equal(saves, 0);
+});
+
+test('a second repair cannot replace or bypass the plan currently shown in preview', async () => {
+  enable({ removeLeakedReasoning: true, defaultAutoFixAction: 'preview' });
+  await controller.triggerManualFix('0');
+  const pending = messageModifier.pendingModifications.get('0');
+  for (const preview of [true, false]) {
+    const result = await messageModifier.modifyMessage('0', 'unexpected replacement', 'manual', preview);
+    assert.equal(result.success, false);
+    assert.equal(messageModifier.pendingModifications.get('0'), pending);
+    assert.equal(saves, 0);
+  }
+  assert.equal((await controller.confirmFix('0', true)).success, true);
+  assert.equal(__testContext.chat[0].mes, pending.newContent);
+  assert.equal(saves, 1);
+});
+
+test('confirmed and cancelled fixes are counted once and reset remains functional', async () => {
+  enable({ removeLeakedReasoning: true, defaultAutoFixAction: 'preview' });
+  await controller.triggerManualFix('0');
+  await controller.confirmFix('0', false);
+  await controller.confirmFix('0', false);
+  assert.equal(controller.getStatistics().userCancellations, 1);
+  await controller.triggerManualFix('0');
+  assert.equal((await controller.confirmFix('0', true)).success, true);
+  assert.equal(controller.getStatistics().successfulFixes, 1);
+  assert.equal(controller.getFixStatistics().totalAttempts, 2);
+  controller.resetStatistics();
+  assert.equal(controller.getStatistics().successfulFixes, 0);
+  assert.equal(controller.getFixStatistics().totalAttempts, 0);
+});
+
+test('save/render failures roll back fields and preserve undo history', async () => {
+  const original = structuredClone(__testContext.chat[0]);
+  failRender = true;
+  assert.equal((await controller.triggerManualFix('0')).success, false);
+  assert.deepEqual(__testContext.chat[0], original);
   assert.equal(controller.canUndoFix('0'), false);
+
+  failRender = false; failSave = true;
+  assert.equal((await controller.triggerManualFix('0')).success, false);
+  assert.deepEqual(__testContext.chat[0], original);
+  assert.equal(controller.canUndoFix('0'), false);
+
+  failSave = false;
+  await controller.triggerManualFix('0');
+  const repaired = structuredClone(__testContext.chat[0]);
+  failSave = true;
+  assert.equal((await controller.undoFix('0')).success, false);
+  assert.deepEqual(__testContext.chat[0], repaired);
+  assert.equal(controller.getFixHistory('0').length, 1);
 });
 
-test('disabled items stay saved, are skipped in validation, and can be reenabled after reload', async () => {
-  const r = rule(); r.contentOptions = { '</content>': { enabled: false } };
-  const engine = new ValidationEngine();
-  engine.initialize([r], true);
-  assert.equal(engine.validateMessage('<content>正文', '0').isValid, true);
-  globalThis.UIState = { rules: [r] };
-  await RulesManagerUI.initialize();
-  const manager = window.RulesManager;
-  manager.setUIState(UIState);
-  await manager.saveRules();
-  const saved = JSON.parse(JSON.stringify(__testContext.extensionSettings['response-linter'].rules[0]));
-  assert.deepEqual(saved.requiredContent, ['<content>', '</content>']);
-  assert.equal(saved.contentOptions['</content>'].enabled, false);
-  engine.initialize([saved], true);
-  assert.equal(engine.validateMessage('<content>正文', '0').isValid, true);
-  saved.contentOptions['</content>'].enabled = true;
-  assert.equal(engine.validateMessage('<content>正文', '0').isValid, false);
-});
-
-test('disabled actions and anchors are excluded from repair', () => {
-  const r = { ...rule(), requiredContent: ['<off>', '<content>', '</content>'],
-    contentOptions: { '<off>': { enabled: false, actions: ['custom'], pattern: '正文', replacement: '错误' } } };
-  const preview = controller.previewFix('正文</content>', ['<content>'], 'positional', r);
-  assert.equal(preview.success, true);
-  assert.ok(!preview.newContent.includes('<off>'));
-  assert.ok(preview.newContent.includes('正文'));
-});
-
-test('undo restores raw/display/swipe text, saves, and is not immediately automatically repaired', async () => {
+test('undo restores raw/display/swipe text and is not automatically repeated with features disabled', async () => {
   const original = structuredClone(__testContext.chat[0]);
   await controller.triggerManualFix('0');
-  fixCoordinator.updateSettings({ enabled: true, autoFix: true, defaultAutoFixAction: 'apply' });
+  enable({ removeLeakedReasoning: false, autoFix: true });
   const undone = await controller.undoFix('0');
   assert.equal(undone.success, true);
   assert.deepEqual(__testContext.chat[0], original);
@@ -117,7 +235,7 @@ test('undo restores raw/display/swipe text, saves, and is not immediately automa
   assert.equal(saves, 2);
 });
 
-test('undo restores distinct original raw and display values and bounded multi-step history', async () => {
+test('undo restores distinct raw and display values with bounded multi-step history', async () => {
   const message = __testContext.chat[0];
   message.mes = 'raw'; message.extra = { display_text: 'display', keep: 1 };
   message.swipes[0] = 'swipe';
@@ -133,59 +251,12 @@ test('undo restores distinct original raw and display values and bounded multi-s
   assert.equal(message.mes, '1');
 });
 
-test('save/render failures roll back fields and preserve undo history', async () => {
-  const original = structuredClone(__testContext.chat[0]);
-  failRender = true;
-  assert.equal((await controller.triggerManualFix('0')).success, false);
-  assert.deepEqual(__testContext.chat[0], original);
-  assert.equal(controller.canUndoFix('0'), false);
-  failRender = false; failSave = true;
-  assert.equal((await controller.triggerManualFix('0')).success, false);
-  assert.deepEqual(__testContext.chat[0], original);
-  failSave = false;
-  await controller.triggerManualFix('0');
-  const repaired = structuredClone(__testContext.chat[0]);
-  failSave = true;
-  assert.equal((await controller.undoFix('0')).success, false);
-  assert.deepEqual(__testContext.chat[0], repaired);
-  assert.equal(controller.getFixHistory('0').length, 1);
-});
-
-test('preview confirmation does not write early and refuses edits or chat switches', async () => {
-  fixCoordinator.updateSettings({ enabled: true, autoFix: false, defaultAutoFixAction: 'preview' });
-  const pending = await controller.triggerManualFix('0');
-  assert.equal(pending.metadata.requiresConfirmation, true);
-  assert.equal(saves, 0);
-  __testContext.chat[0].mes += 'edited';
-  assert.equal((await controller.confirmFix('0', true)).success, false);
-  assert.equal(saves, 0);
-  await controller.triggerManualFix('0');
-  __testContext.chat = [{ mes: '<content>other chat' }];
-  assert.equal((await controller.confirmFix('0', true)).success, false);
-  assert.equal(saves, 0);
-});
-
-test('confirmed and cancelled fixes are counted once, reset is functional', async () => {
-  fixCoordinator.updateSettings({ enabled: true, autoFix: false, defaultAutoFixAction: 'preview' });
-  await controller.triggerManualFix('0');
-  await controller.confirmFix('0', false);
-  await controller.confirmFix('0', false);
-  assert.equal(controller.getStatistics().userCancellations, 1);
-  await controller.triggerManualFix('0');
-  assert.equal((await controller.confirmFix('0', true)).success, true);
-  assert.equal(controller.getStatistics().successfulFixes, 1);
-  assert.equal(controller.getFixStatistics().totalAttempts, 2);
-  controller.resetStatistics();
-  assert.equal(controller.getStatistics().successfulFixes, 0);
-  assert.equal(controller.getFixStatistics().totalAttempts, 0);
-});
-
 test('undo cannot affect another chat, swipe or a later manual edit', async () => {
   await controller.triggerManualFix('0');
   const message = __testContext.chat[0];
   message.mes += ' edited';
   assert.equal((await controller.undoFix('0')).success, false);
-  __testContext.chat = [{ mes: 'other chat' }];
+  __testContext.chat = [messageFixture('other chat')];
   assert.equal(controller.canUndoFix('0'), false);
   assert.equal((await controller.undoFix('0')).success, false);
   __testContext.chat = [message];
@@ -194,88 +265,94 @@ test('undo cannot affect another chat, swipe or a later manual edit', async () =
   assert.equal(controller.canUndoFix('0'), false);
 });
 
-test('ordered repeated tags/code fences consume separate occurrences', () => {
-  const engine = new ValidationEngine();
-  engine.initialize([rule()], true);
-  assert.equal(engine.validateMessage('<content>a</content><content>b</content>', '0').isValid, true);
-  assert.equal(engine.validateMessage('</content>a<content>', '0').errorType, 'order');
-  engine.initialize([{ ...rule(), requiredContent: ['```', '```'] }], true);
-  assert.equal(engine.validateMessage('```js\nhello\n```', '0').isValid, true);
-  assert.equal(engine.validateMessage('```js\nhello', '0').isValid, false);
-});
-
-test('preview uses latest rule and cannot change messages or engine enable state', () => {
+test('previewLatestFix is zero-write and an unconfigured generic rule cannot alter its result', () => {
   const before = structuredClone(__testContext.chat);
-  autoFixEngine.setEnabled(false);
-  ResponseLinter.CurrentRule = { id: 'previous' };
   const preview = controller.previewLatestFix();
   assert.equal(preview.success, true);
+  assert.equal(preview.newContent, '<content>正文</content>');
   assert.deepEqual(__testContext.chat, before);
-  assert.equal(autoFixEngine.isEnabled, false);
-  assert.equal(ResponseLinter.CurrentRule.id, 'previous');
   assert.equal(saves, 0);
+  const legacy = controller.previewFix('<content>正文', ['</content>'], 'add-missing-tags');
+  assert.equal(legacy.success, false);
+  assert.match(legacy.reason, /已移除通用规则/);
 });
 
-test('explicit repair never falls back to deleting undeclared tags', () => {
-  const r = rule();
-  const source = '<content><details>keep me</details></content>';
-  const preview = controller.previewFix(source, [], 'unknown', r);
-  assert.equal(preview.success, false);
-  assert.equal(preview.newContent, source);
-});
-
-test('new-rule content actions are kept in draft instead of mutating an existing rule', () => {
-  const editor = new RuleEditorUI();
-  const before = structuredClone(UIState.rules);
-  editor.setContentActions('<content>', ['custom'], 'pattern', '');
-  assert.equal(editor.contentOptions['<content>'].replacement, '');
-  assert.deepEqual(UIState.rules, before);
-});
-
-test('editing a disabled item uses a cancellable draft and saves its enabled state', () => {
-  const fields = new Map();
-  const field = selector => {
-    if (!fields.has(selector)) fields.set(selector, {
-      value: '', props: {}, jquery: 'test', length: 0,
-      val(value) { if (arguments.length) { this.value = value; return this; } return this.value; },
-      prop(key, value) { if (arguments.length > 1) { this.props[key] = value; return this; } return this.props[key]; },
-      text() { return this; }, remove() { return this; }, append() { return this; },
-      show() { return this; }, hide() { return this; }, fadeOut(_ms, done) { done?.(); },
-      removeClass() { return this; },
-    });
-    return fields.get(selector);
+test('body-boundary repair, undo and save rollback preserve memory-extra, swipe_info and chat metadata', async () => {
+  const source = '【正文】叙事\n【水印】logo\n【/正文】';
+  const extra = {
+    display_text: source,
+    qianqianjie_floor: { schemaVersion: 2, floorId: 'floor-a' },
+    qqj_v3_recall_receipt: { schemaVersion: 1, fingerprint: 'fp-a' },
+    qianqianjieAutoHide: { schemaVersion: 1, chatId: 'q' },
+    qianqianjie_memory_excluded: true,
+    keep_me: { nested: [1, 2, 3] },
   };
-  globalThis.$ = target => typeof target === 'string' ? field(target) : target;
-  globalThis.HTMLElement = class {};
-  globalThis.CSS = { escape: value => value };
-  document.querySelector = () => null;
-  const editor = new RuleEditorUI(); editor.setUIState(UIState);
-  editor.updateTagsList = () => {}; editor.showModal = () => {};
-  const original = rule(); original.contentOptions = { '</content>': { enabled: false, actions: ['balance-pairs'] } };
-  UIState.rules = [original];
-  editor.showEditModal('r');
-  const row = { jquery: 'test', attr: () => '</content>', toggleClass() {} };
-  editor.toggleContentItem(row, true);
-  assert.equal(original.contentOptions['</content>'].enabled, false);
-  editor.hideModal();
-  assert.equal(original.contentOptions['</content>'].enabled, false);
-  editor.showEditModal('r');
-  assert.equal(editor.contentOptions['</content>'].enabled, false);
-  editor.toggleContentItem(row, true);
-  let saved;
-  window.RulesManager = { editRule: (_id, data) => { saved = data; } };
-  editor.saveRule();
-  assert.equal(saved.contentOptions['</content>'].enabled, true);
-  assert.deepEqual(saved.contentOptions['</content>'].actions, ['balance-pairs']);
-  delete globalThis.$;
+  const message = {
+    name: 'AI', is_user: false, swipe_id: 0,
+    mes: source, swipes: [source, '<正文>另一个候选</正文>'],
+    swipe_info: [{ extra: { ...extra } }, { extra: { display_text: '<正文>另一个候选</正文>' } }],
+    extra: { ...extra },
+  };
+  __testContext.chat = [message];
+  __testContext.chatMetadata = {
+    qianqianjie: { schemaVersion: 2, chatId: 'q' },
+    'sp-store': { data: { stable: true } },
+    other: { nested: true },
+  };
+  const metadataSnapshot = structuredClone(__testContext.chatMetadata);
+  const extraSnapshot = structuredClone(message.extra);
+  const swipeInfoSnapshot = structuredClone(message.swipe_info);
+  enable({
+    removeLeakedReasoning: false,
+    repairSdcBoundary: true,
+    repairDetailsOrder: false,
+    structureProfilesVersion: 1,
+    structureProfiles: [plainProfile],
+    structureProfileId: plainProfile.id,
+  });
+
+  const repaired = await controller.triggerManualFix('0');
+  assert.equal(repaired.success, true);
+  assert.ok(message.mes.indexOf('【/正文】') < message.mes.indexOf('【水印】'));
+  assert.equal(message.extra.display_text, message.mes);
+  assert.equal(message.swipes[0], message.mes);
+  assert.equal(message.swipes[1], '<正文>另一个候选</正文>', 'inactive swipe unchanged');
+  assert.deepEqual(message.swipe_info, swipeInfoSnapshot);
+  assert.deepEqual(__testContext.chatMetadata, metadataSnapshot);
+  assert.deepEqual({ ...message.extra, display_text: extraSnapshot.display_text }, extraSnapshot);
+  assert.equal(__testContext.eventSource.emitted, 0);
+  assert.equal(saves, 1);
+
+  const undo = await controller.undoFix('0');
+  assert.equal(undo.success, true);
+  assert.equal(message.mes, source);
+  assert.equal(message.extra.display_text, source);
+  assert.equal(message.swipes[0], source);
+  assert.equal(message.swipes[1], '<正文>另一个候选</正文>');
+  assert.deepEqual(message.swipe_info, swipeInfoSnapshot);
+  assert.deepEqual(__testContext.chatMetadata, metadataSnapshot);
+
+  __testContext.saveChat = async () => { throw new Error('save failed'); };
+  const beforeRollback = structuredClone(message);
+  const failed = await controller.triggerManualFix('0');
+  assert.equal(failed.success, false);
+  assert.equal(message.mes, beforeRollback.mes);
+  assert.equal(message.extra.display_text, beforeRollback.extra.display_text);
+  assert.equal(message.swipes[0], beforeRollback.swipes[0]);
+  assert.deepEqual(message.swipe_info, swipeInfoSnapshot);
+  assert.deepEqual(__testContext.chatMetadata, metadataSnapshot);
 });
 
-test('standalone browser harness has working imports and passes its assertions', async () => {
-  const output = { innerHTML: '' };
-  document.getElementById = () => output;
-  await import('./harness.js');
-  await new Promise(resolve => setTimeout(resolve, 350));
-  const counts = output.innerHTML.match(/通过 (\d+) \/ (\d+) 项/);
-  assert.ok(counts);
-  assert.equal(counts[1], counts[2]);
+test('streaming context rejects manual and auto structure repair without writing', async () => {
+  __testContext.streamingProcessor = { isFinished: false };
+  const before = structuredClone(__testContext.chat[0]);
+  const manual = await controller.triggerManualFix('0');
+  assert.equal(manual.success, false);
+  assert.match(manual.reason, /流式/);
+  enable({ removeLeakedReasoning: true, autoFix: true });
+  await controller._handleMessageProcessed({ messageId: '0', content: before.mes, name: 'AI' });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(__testContext.chat[0], before);
+  assert.equal(saves, 0);
+  assert.equal(fixCoordinator.fixQueue.length, 0);
 });

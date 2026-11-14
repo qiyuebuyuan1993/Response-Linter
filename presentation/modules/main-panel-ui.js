@@ -8,6 +8,8 @@ function isModalVisible() {
       '.popup[open]',
       '#dialogue_popup:not([hidden])',
       '.dialogue_popup:not([hidden])',
+      '.rl-compat-overlay',
+      '.rl-confirmation-dialog',
     ];
     const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
     return candidates.some(element => {
@@ -21,15 +23,20 @@ function isModalVisible() {
 }
 
 function drawerLauncherHtml() {
+  // Native inline-drawer header row/card. The whole row is the accessible
+  // launcher; there is no separate tiny button.
   return `
-    <div class="rl-drawer-launcher" data-rl-launcher="drawer">
-      <div class="rl-drawer-launcher-text">
-        <b>响应检查器</b>
-        <small id="rl-drawer-status">打开主面板以配置规则与结构档案</small>
+    <div class="rl-drawer-card" data-rl-launcher="drawer">
+      <div class="inline-drawer">
+        <div id="rl-open-main-panel" class="inline-drawer-toggle inline-drawer-header rl-drawer-launcher"
+          role="button" tabindex="0" aria-label="打开响应检查器设置">
+          <b>响应检查器</b>
+          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down fa-fw" aria-hidden="true"></div>
+        </div>
+        <div class="inline-drawer-content">
+          <span id="rl-drawer-status">打开设置以配置回复修复方案、历法与自动修复</span>
+        </div>
       </div>
-      <button id="rl-open-main-panel" class="menu_button secondary small" type="button">
-        <i class="fa-solid fa-wrench"></i> 打开设置
-      </button>
     </div>
   `;
 }
@@ -38,9 +45,9 @@ function wandLauncherHtml() {
   return `
     <div id="rl_wand_container" class="extension_container">
       <div id="rl-wand-button" class="list-group-item flex-container flexGap5" role="button" tabindex="0"
-        title="响应检查器：规则、结构档案与修复" aria-label="打开响应检查器设置">
+        title="响应检查器" aria-label="打开响应检查器设置">
         <i class="fa-solid fa-wrench extensionsMenuExtensionButton" aria-hidden="true"></i>
-        <span>响应检查器</span>
+          <span>响应检查器</span>
       </div>
     </div>
   `;
@@ -141,7 +148,7 @@ export function setupMainPanel({
   };
 
   const close = () => {
-    if (overlay.hidden) return;
+    if (overlay.hidden || isModalVisible()) return;
     overlay.hidden = true;
     document.body.classList.remove('rl-main-panel-open');
     try { onClose(); } catch {}
