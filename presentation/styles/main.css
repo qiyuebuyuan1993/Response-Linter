@@ -1737,9 +1737,7 @@ body.rl-modal-open { overflow: hidden !important; }
 }
 
 #rl-wand-button {
-  min-width: 38px;
-  min-height: 38px;
-  justify-content: center;
+  justify-content: flex-start;
   cursor: pointer;
   touch-action: manipulation;
 }
@@ -2122,6 +2120,11 @@ body.rl-main-panel-open {
 }
 
 .rl-main-panel-body input[type="checkbox"] {
-  width: auto;
+  /* Host/theme checkboxes use appearance:none and need a real box even when
+     their pseudo-element is hidden or absolutely positioned. */
+  width: var(--mainFontSize, 1rem);
+  height: var(--mainFontSize, 1rem);
+  min-width: var(--mainFontSize, 1rem);
+  min-height: var(--mainFontSize, 1rem);
   flex: 0 0 auto;
 }
