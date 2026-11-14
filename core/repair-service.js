@@ -13,8 +13,11 @@ import {
   messageSwipeId,
 } from './host-context.js';
 import { sanitizeLeakedReasoning } from './reasoning-sanitizer.js';
-import { repairSdcContent } from './sdc-boundary.js';
-import { repairDetailsOutsideContent } from './details-repair.js';
+import {
+  buildProfileAnchorPatterns,
+  readStructureProfiles,
+} from './structure-profiles.js';
+import { repairWithProfile } from './structure-repair.js';
 
 export const FEATURE_STRATEGIES = Object.freeze({
   reasoning: 'remove-leaked-reasoning',
@@ -57,9 +60,14 @@ export function transformContent(content, settings, ctx = null) {
   const strategies = [];
   const warnings = [];
   const details = {};
+  const profileCollection = readStructureProfiles(settings);
+  const profile = profileCollection.activeProfile;
 
   if (normalized.removeLeakedReasoning) {
-    const reasoning = sanitizeLeakedReasoning(current);
+    const reasoning = sanitizeLeakedReasoning(current, {
+      anchorPatterns: buildProfileAnchorPatterns(profile),
+      useDefaultAnchorPatterns: false,
+    });
     details.reasoning = reasoning;
     if (reasoning.warnings.length) warnings.push(...reasoning.warnings);
     if (reasoning.changed) {
@@ -69,9 +77,10 @@ export function transformContent(content, settings, ctx = null) {
   }
 
   let calendarResult = null;
-  if (normalized.repairSdcBoundary) {
-    // 历法只在真正需要合成缺失 SDC-end 时才解析；普通回复、已有结束注释的
-    // 边界移动都不应该产生“历法缺失”的无关警告。
+  if (normalized.repairSdcBoundary || normalized.repairDetailsOrder) {
+    // One shared profile-driven pass. The calendar resolver is lazy: it is only
+    // called when a missing end marker needs synthesis, never for time mode
+    // none or for moving an existing marker.
     let resolved = null;
     const resolveOnce = () => {
       if (!resolved) {
@@ -83,47 +92,25 @@ export function transformContent(content, settings, ctx = null) {
       }
       return resolved;
     };
-    const boundary = repairSdcContent(current, {
+    const structure = repairWithProfile(current, profile, {
+      bodyBoundaryEnabled: normalized.repairSdcBoundary,
+      trailingOrderEnabled: normalized.repairDetailsOrder,
       resolveCalendar: resolveOnce,
       advanceMinutes: normalized.advanceMinutes,
       source: normalized.calendarSource,
     });
-    details.boundary = boundary;
+    if (normalized.repairSdcBoundary && structure.boundary) details.boundary = structure.boundary;
+    if (normalized.repairDetailsOrder && structure.trailing) details.detailsRepair = structure.trailing;
     if (resolved) {
       calendarResult = resolved;
       details.calendar = resolved;
-      if (!resolved.ok) {
-        warnings.push(`历法来源不可用：${resolved.error}`);
-      }
+      if (!resolved.ok) warnings.push(`历法来源不可用：${resolved.error}`);
     }
-    if (boundary.warnings.length) warnings.push(...boundary.warnings);
-    if (boundary.changed) {
-      current = boundary.content;
-      strategies.push(FEATURE_STRATEGIES.boundary);
-    }
-    if (boundary.calendar) calendarResult = {
-      ...(resolved || {}),
-      ok: true,
-      calendar: boundary.calendar,
-      source: boundary.source || resolved?.source,
-      sourceLabel: boundary.sourceLabel || resolved?.sourceLabel,
-    };
-  }
-
-  if (normalized.repairDetailsOrder) {
-    // 两个开关同时开启时，先修复正文边界，再在已经安全的外部区域排序折叠块；
-    // 本步骤不移动 SDC-end / </content>，也不触发历法读取。
-    const detailsResult = repairDetailsOutsideContent(current, {
-      monologueKeyword: normalized.detailsMonologueKeyword,
-      choicesKeyword: normalized.detailsChoicesKeyword,
-      boundaryEnabled: normalized.repairSdcBoundary,
-    });
-    details.detailsRepair = detailsResult;
-    if (detailsResult.warnings.length) warnings.push(...detailsResult.warnings);
-    if (detailsResult.changed) {
-      current = detailsResult.content;
-      strategies.push(FEATURE_STRATEGIES.detailsOrder);
-    }
+    if (structure.warnings.length) warnings.push(...structure.warnings);
+    if (structure.boundary?.changed) strategies.push(FEATURE_STRATEGIES.boundary);
+    if (structure.trailing?.changed) strategies.push(FEATURE_STRATEGIES.detailsOrder);
+    if (structure.changed) current = structure.content;
+    if (structure.calendarResult) calendarResult = structure.calendarResult;
   }
 
   return {
@@ -134,6 +121,8 @@ export function transformContent(content, settings, ctx = null) {
     details,
     calendarResult,
     settings: normalized,
+    profile,
+    profileCollection,
   };
 }
 

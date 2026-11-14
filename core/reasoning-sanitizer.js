@@ -67,9 +67,24 @@ function analyzeTokens(text) {
   };
 }
 
+function findAnchors(text, ranges, anchorPatterns, useDefaultAnchors = true) {
+  const defaults = useDefaultAnchors ? findMatchesOutsideRanges(text, CLEAR_ANCHOR_RE, ranges) : [];
+  if (!Array.isArray(anchorPatterns) || !anchorPatterns.length) return defaults;
+  const custom = [];
+  for (const pattern of anchorPatterns) {
+    if (!(pattern instanceof RegExp)) continue;
+    try {
+      custom.push(...findMatchesOutsideRanges(text, pattern, ranges));
+    } catch {
+      // Generated patterns are trusted; malformed optional patterns are ignored.
+    }
+  }
+  return [...defaults, ...custom].sort((left, right) => left.index - right.index);
+}
+
 /**
  * @param {string} content
- * @param {{maxIterations?:number}} options
+ * @param {{maxIterations?:number, anchorPatterns?:RegExp[]}} options
  * @returns {{content:string, changed:boolean, removedBlocks:number, removedLeaks:number, warnings:string[]}}
  */
 export function sanitizeLeakedReasoning(content, options = {}) {
@@ -94,7 +109,8 @@ export function sanitizeLeakedReasoning(content, options = {}) {
     }
 
     // 没有可安全配对的完整块时，才处理“未闭合但后面有明确正文锚点”的泄漏。
-    const anchors = findMatchesOutsideRanges(result, CLEAR_ANCHOR_RE, analysis.ranges);
+    const anchors = findAnchors(result, analysis.ranges, options.anchorPatterns,
+      options.useDefaultAnchorPatterns !== false);
     let leak = null;
     for (const open of analysis.unmatchedOpenings) {
       const anchor = anchors.find(match => match.index >= open.end);

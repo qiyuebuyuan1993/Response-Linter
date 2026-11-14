@@ -1,0 +1,31 @@
+{
+  "format": "response-linter-quick-reply-descriptor",
+  "version": 1,
+  "command": {
+    "name": "response-linter-fix",
+    "version": 1
+  },
+  "set": {
+    "baseName": "Response Linter",
+    "disableSend": false,
+    "injectInput": false,
+    "placeBeforeInput": false,
+    "activateOnFirstInstall": true,
+    "visible": true
+  },
+  "button": {
+    "label": "修复最新回复",
+    "title": "[response-linter-qr] 修复最新 AI 回复（/response-linter-fix）",
+    "message": "/response-linter-fix",
+    "showLabel": true,
+    "isHidden": false,
+    "executeOnStartup": false,
+    "executeOnUser": false,
+    "executeOnAi": false,
+    "executeOnChatChange": false,
+    "executeOnGroupMemberDraft": false,
+    "executeOnNewChat": false,
+    "executeBeforeGeneration": false,
+    "automationId": ""
+  }
+}

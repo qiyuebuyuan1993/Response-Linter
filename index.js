@@ -4,7 +4,6 @@ import { getFreshContext } from './core/host-context.js';
 import {
   DEFAULT_ADVANCE_MINUTES,
   describeCalendar,
-  resolveCalendarSource,
 } from './core/calendar-engine.js';
 import {
   createStructureSettingsExport,
@@ -16,7 +15,32 @@ import {
   readFeatureSettings,
   seedCustomCalendarDraft,
 } from './core/feature-settings.js';
-import { escapeHtmlText as escapeHtml, joinWarningToasts } from './core/text-safety.js';
+import {
+  escapeHtmlText as escapeHtml,
+  formatErrorForToast,
+  joinWarningToasts,
+} from './core/text-safety.js';
+import { structureProfileUI } from './presentation/modules/structure-profile-ui.js';
+import {
+  installDrawerLauncher,
+  installWandLauncher,
+  setupMainPanel,
+} from './presentation/modules/main-panel-ui.js';
+import {
+  mergeStructureProfiles,
+  migrateStructureProfileSettings,
+  readStructureProfiles,
+} from './core/structure-profiles.js';
+import {
+  resolveCalendarAwareness,
+  watchCalendarAwareness,
+} from './core/calendar-awareness.js';
+import { registerQuickReplyCommand } from './core/quick-reply-command.js';
+import {
+  createQuickReplyInstaller,
+  defaultQuickReplyInstallState,
+  normalizeQuickReplyInstallState,
+} from './core/quick-reply-installer.js';
 
 // 统一通过 getContext() 与酒馆交互，避免直接导入内部文件。
 // 优先实际宿主 window.SillyTavern.getContext，每次现取。
@@ -181,6 +205,10 @@ const defaultSettings = {
   sdcCalendarSource: 'gouhua',
   sdcCustomCalendarJson: '',
   sdcAdvanceMinutes: DEFAULT_ADVANCE_MINUTES,
+  structureProfilesVersion: 1,
+  structureProfiles: [],
+  structureProfileId: '',
+  quickReplyInstall: defaultQuickReplyInstallState(),
   rules: [
     {
       id: 'thinking-content-demo',
@@ -411,21 +439,289 @@ function setCalendarStatus(text, isError = false) {
   element.toggleClass('rl-calendar-error', !!isError);
 }
 
+function getCurrentSettingsObject() {
+  try {
+    const ctx = __getCtx();
+    const root = ctx?.extensionSettings || extension_settings;
+    if (root?.[extensionName] && typeof root[extensionName] === 'object') return root[extensionName];
+  } catch {}
+  try {
+    if (extension_settings?.[extensionName] && typeof extension_settings[extensionName] === 'object') {
+      return extension_settings[extensionName];
+    }
+  } catch {}
+  return defaultSettings;
+}
+
+/**
+ * Automatic, read-only calendar status. It refreshes on ready, chat switch,
+ * panel open and the public Gouhua calendar event. It never writes metadata,
+ * never invents a fallback calendar and never toasts on background refreshes.
+ */
 function refreshCalendarStatus() {
   try {
-    const source = $('#rl-sdc-calendar-source').val() || FEATURE_DEFAULTS.sdcCalendarSource;
-    const customJson = $('#rl-sdc-custom-calendar').val() || '';
-    const result = resolveCalendarSource({ source, customJson, ctx: __getCtx() });
-    if (result.ok) {
-      setCalendarStatus(`${result.sourceLabel}：${describeCalendar(result.calendar)}`, false);
-    } else {
-      setCalendarStatus(`${result.sourceLabel || source}：${result.error}`, true);
-    }
+    const persisted = getCurrentSettingsObject();
+    const source = $('#rl-sdc-calendar-source').val() || persisted.sdcCalendarSource || FEATURE_DEFAULTS.sdcCalendarSource;
+    const customJson = $('#rl-sdc-custom-calendar').val() || persisted.sdcCustomCalendarJson || '';
+    const result = resolveCalendarAwareness({
+      ...persisted,
+      sdcCalendarSource: source,
+      sdcCustomCalendarJson: customJson,
+    }, __getCtx());
+    setCalendarStatus(result.message || (result.ok
+      ? `${result.sourceLabel}：${describeCalendar(result.calendar)}`
+      : `${result.sourceLabel || source}：${result.error || '历法不可用'}`), !result.ok);
     return result;
   } catch (error) {
-    setCalendarStatus(`历法检测失败：${error.message}`, true);
+    setCalendarStatus(`历法状态读取失败：${error.message}`, true);
     return { ok: false, error: error.message };
   }
+}
+
+let calendarWatchStop = null;
+let calendarRefreshTimer = null;
+function ensureCalendarWatch() {
+  if (calendarWatchStop) return;
+  const ctx = __getCtx() || {};
+  calendarWatchStop = watchCalendarAwareness({
+    eventSource: ctx.eventSource || null,
+    eventTypes: ctx.eventTypes || ctx.event_types || null,
+    windowObject: window,
+    onChanged: () => {
+      if (calendarRefreshTimer) clearTimeout(calendarRefreshTimer);
+      calendarRefreshTimer = setTimeout(() => {
+        calendarRefreshTimer = null;
+        try { refreshCalendarStatus(); } catch {}
+      }, 250);
+    },
+  });
+}
+
+// ===== 1.4.8 结构档案保存 / 主面板 / Quick Reply =====
+let mainPanel = null;
+let quickReplyInstaller = null;
+let quickReplyCommand = null;
+let qrAutoTimer = null;
+let qrAutoAttempts = 0;
+let qrAutoStopped = false;
+let qrCollisionNotified = false;
+
+function persistStructureProfiles(profiles, activeProfileId) {
+  const settings = getCurrentSettingsObject();
+  const merged = mergeStructureProfiles(settings, {
+    structureProfiles: profiles,
+    structureProfileId: activeProfileId,
+  });
+  if (merged.rejected) {
+    return { ok: false, warnings: merged.warnings };
+  }
+  Object.assign(settings, merged.fields);
+  try {
+    saveSettings();
+  } catch (error) {
+    return { ok: false, warnings: [`结构档案保存失败：${error.message}`] };
+  }
+  return { ok: true, warnings: merged.warnings };
+}
+
+function setQrStatus(text, isError = false) {
+  const element = document.getElementById('rl-qr-status-text');
+  if (element) {
+    element.textContent = text || '';
+    element.classList.toggle('rl-calendar-error', !!isError);
+  }
+}
+
+function readPersistedQuickReplyState() {
+  try { return normalizeQuickReplyInstallState(getCurrentSettingsObject().quickReplyInstall); }
+  catch { return defaultQuickReplyInstallState(); }
+}
+
+function hasSettingsNamespace() {
+  try {
+    const root = __getCtx()?.extensionSettings || extension_settings;
+    return !!root && Object.prototype.hasOwnProperty.call(root, extensionName);
+  } catch {
+    return false;
+  }
+}
+
+function persistQuickReplyInstallState(state) {
+  try {
+    if (!hasSettingsNamespace()) throw new Error('扩展设置命名空间尚未就绪');
+    const settings = getCurrentSettingsObject();
+    settings.quickReplyInstall = normalizeQuickReplyInstallState(state);
+    try { if (window.extension_settings) window.extension_settings[extensionName] = settings; } catch {}
+    try {
+      const ctx = __getCtx();
+      const acc = ctx?.accountStorage;
+      if (acc?.setItem) acc.setItem('response_linter_settings', JSON.stringify(settings));
+    } catch {}
+    const saveFn = __getCtx()?.saveSettingsDebounced || saveSettingsDebounced;
+    if (typeof saveFn === 'function') saveFn();
+  } catch (error) {
+    console.warn('[Response Linter] 保存 Quick Reply 安装标记失败', error);
+    throw error;
+  }
+}
+
+async function runQrRepairAction() {
+  if (!backendController?.triggerManualFix) throw new Error('后端尚未就绪');
+  const latest = backendController.getLatestAIMessage?.();
+  if (!latest) return { success: false, reason: '没有找到可修复的 AI 回复。' };
+  const result = await backendController.triggerManualFix(String(latest.id));
+  if (result?.metadata?.requiresConfirmation) {
+    try { window.toastr?.info?.('已打开修复预览，请确认或取消。', '响应检查器'); } catch {}
+    return { success: true, pendingConfirmation: true };
+  }
+  if (result?.success) {
+    try { window.toastr?.success?.('修复已应用', '响应检查器'); } catch {}
+    return { success: true };
+  }
+  return { success: false, reason: result?.reason || '修复失败' };
+}
+
+function ensureQuickReplyCommand() {
+  if (quickReplyCommand?.ok) return quickReplyCommand;
+  if (quickReplyCommand?.state === 'collision') return quickReplyCommand;
+  const ctx = __getCtx() || {};
+  quickReplyCommand = registerQuickReplyCommand({
+    ctx,
+    runRepair: runQrRepairAction,
+    toastr: window.toastr,
+  });
+  if (!quickReplyCommand.ok && quickReplyCommand.state === 'collision') {
+    setQrStatus(quickReplyCommand.reason, true);
+    if (!qrCollisionNotified) {
+      qrCollisionNotified = true;
+      try { window.toastr?.warning?.(escapeHtml(quickReplyCommand.reason), '响应检查器', { escapeHtml: false, timeOut: 8000 }); } catch {}
+    }
+    qrAutoStopped = true;
+    if (qrAutoTimer) clearTimeout(qrAutoTimer);
+  }
+  return quickReplyCommand;
+}
+
+function refreshQuickReplyStatus() {
+  if (!quickReplyCommand || quickReplyCommand.state === 'unavailable') {
+    setQrStatus('Quick Reply 斜杠命令尚未就绪；正在等待宿主 API。');
+    return;
+  }
+  if (quickReplyCommand.state === 'collision') {
+    setQrStatus(quickReplyCommand.reason, true);
+    return;
+  }
+  if (!quickReplyInstaller) {
+    setQrStatus('Quick Reply API 尚未就绪；可稍后重试。');
+    return;
+  }
+  const status = quickReplyInstaller.getStatus();
+  setQrStatus(status.message || '尚未检查 Quick Reply 安装状态。', ['error', 'collision', 'duplicate'].includes(status.state));
+}
+
+function ensureQuickReplyInstaller() {
+  if (quickReplyInstaller) return quickReplyInstaller;
+  if (!quickReplyCommand?.ok) return null;
+  quickReplyInstaller = createQuickReplyInstaller({
+    getApi: () => globalThis.quickReplyApi,
+    getCommandReady: () => quickReplyCommand || { ok: false, state: 'unavailable' },
+    readState: readPersistedQuickReplyState,
+    writeState: persistQuickReplyInstallState,
+    notify: (message, isError) => {
+      setQrStatus(message, isError);
+    },
+  });
+  return quickReplyInstaller;
+}
+
+function scheduleQrAutoCheck(delay = 1000) {
+  if (qrAutoStopped) return;
+  if (qrAutoTimer) clearTimeout(qrAutoTimer);
+  qrAutoTimer = setTimeout(() => {
+    qrAutoTimer = null;
+    void autoCheckQuickReply();
+  }, delay);
+}
+
+async function autoCheckQuickReply() {
+  if (qrAutoStopped) return;
+  ensureQuickReplyCommand();
+  if (quickReplyCommand?.state === 'collision') {
+    refreshQuickReplyStatus();
+    return;
+  }
+  const installer = ensureQuickReplyInstaller();
+  if (!installer) {
+    refreshQuickReplyStatus();
+    qrAutoAttempts++;
+    if (qrAutoAttempts < 20) scheduleQrAutoCheck();
+    return;
+  }
+  const status = await installer.ensureInstalled();
+  setQrStatus(status?.message || '', ['error', 'collision', 'duplicate'].includes(status?.state));
+  if (['installed', 'removed', 'collision', 'duplicate'].includes(status?.state)) {
+    qrAutoStopped = true;
+    if (qrAutoTimer) clearTimeout(qrAutoTimer);
+    return;
+  }
+  qrAutoAttempts++;
+  if (qrAutoAttempts < 20) scheduleQrAutoCheck();
+}
+
+function startQuickReplySurface() {
+  qrAutoStopped = false;
+  qrAutoAttempts = 0;
+  ensureQuickReplyCommand();
+  refreshQuickReplyStatus();
+  scheduleQrAutoCheck(200);
+}
+
+async function restoreQuickReplyButton() {
+  ensureQuickReplyCommand();
+  if (quickReplyCommand?.state === 'collision') {
+    refreshQuickReplyStatus();
+    return;
+  }
+  const installer = ensureQuickReplyInstaller();
+  if (!installer) {
+    setQrStatus('Quick Reply API 尚未就绪，无法恢复；请稍后重试。', true);
+    return;
+  }
+  const status = await installer.restore();
+  setQrStatus(status?.message || '', ['error', 'collision', 'duplicate'].includes(status?.state));
+}
+
+function openMainSettingsPanel() {
+  if (!mainPanel) return;
+  try { structureProfileUI.onPanelOpen(); } catch {}
+  try { refreshCalendarStatus(); } catch {}
+  try { refreshQuickReplyStatus(); } catch {}
+  try { UIState.updateStatistics?.(); UIState.updateStatusIndicator?.(); } catch {}
+  mainPanel.open();
+}
+
+function setupLaunchers(settingsHtml) {
+  mainPanel = setupMainPanel({
+    settingsHtml,
+    onOpen: () => {
+      try { structureProfileUI.onPanelOpen(); } catch {}
+      try { refreshCalendarStatus(); } catch {}
+      try { refreshQuickReplyStatus(); } catch {}
+      try { UIState.updateStatistics?.(); UIState.updateStatusIndicator?.(); } catch {}
+    },
+    onQrRestore: () => { void restoreQuickReplyButton(); },
+    onStatusText: () => '响应检查器',
+  });
+  structureProfileUI.initialize({
+    getSettings: getCurrentSettingsObject,
+    persistProfiles: persistStructureProfiles,
+    notify: (text, isError) => {
+      if (window.toastr && isError) window.toastr.warning?.(escapeHtml(text), '响应检查器', { escapeHtml: false });
+    },
+  });
+  const target = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
+  if (target?.length) installDrawerLauncher(target[0]);
+  installWandLauncher({ attempts: 12, delayMs: 250 });
 }
 
 // 设置管理
@@ -460,6 +756,10 @@ async function loadSettings() {
   if (!settings) {
     settings = JSON.parse(JSON.stringify(defaultSettings));
   }
+
+  // 旧版设置自动派生版本化结构档案；不依赖用户点击保存，也不重置任何既有字段。
+  const profileMigration = migrateStructureProfileSettings(settings);
+  if (Object.keys(profileMigration.fields).length) Object.assign(settings, profileMigration.fields);
 
   // 仅当宿主已有我们的命名空间时才镜像到 window.extension_settings/ctx，避免早期写入导致“默认值落盘”
   if (hasKey) {
@@ -500,6 +800,8 @@ async function loadSettings() {
   }
   $('#rl-sdc-advance-minutes').val(features.sdcAdvanceMinutes);
   updateCalendarCustomVisibility();
+  try { structureProfileUI.refreshFromSettings({ preserveDraft: false }); } catch (e) { console.warn('[Response Linter] profile UI refresh failed', e); }
+  try { ensureCalendarWatch(); } catch {}
   try { refreshCalendarStatus(); } catch {}
 
   // 渲染规则并更新状态
@@ -535,6 +837,18 @@ async function loadSettings() {
       }
     }
   } catch (e) { console.warn('[Response Linter] 后端启动回退失败:', e); }
+
+  // 自动迁移写回：用户不需要点击“保存”。只在宿主已有命名空间时写，避免早期默认值落盘。
+  if (profileMigration.migrated && hasKey) {
+    try {
+      settingsRoot[extensionName] = settings;
+      if (window.extension_settings) window.extension_settings[extensionName] = settings;
+      saveSettings();
+      console.info('[Response Linter] 结构配置档案已自动迁移并保存');
+    } catch (e) {
+      console.warn('[Response Linter] 结构配置档案自动迁移保存失败:', e);
+    }
+  }
 }
 
 function saveSettings() {
@@ -573,6 +887,9 @@ function saveSettings() {
     sdcAdvanceMinutes: $('#rl-sdc-advance-minutes').val(),
   });
   Object.assign(settings, merged.fields);
+  if (!Array.isArray(settings.structureProfiles) || !settings.structureProfiles.length) {
+    Object.assign(settings, migrateStructureProfileSettings(settings).fields);
+  }
   $('#rl-sdc-calendar-source').val(settings.sdcCalendarSource);
   $('#rl-details-monologue-keyword').val(settings.detailsMonologueKeyword);
   $('#rl-details-choices-keyword').val(settings.detailsChoicesKeyword);
@@ -707,6 +1024,25 @@ function setupBackendEventHandlers() {
 
 // 事件处理器设置
 function setupEventHandlers() {
+  // Child modals close before the shared main panel. Capture phase avoids the
+  // parent panel also closing on the same Escape key.
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    try {
+      const ruleEditorVisible = $('#rl-rule-editor-modal').is(':visible');
+      const wizardVisible = $('#rl-config-wizard-modal').is(':visible');
+      if (ruleEditorVisible) {
+        event.preventDefault();
+        event.stopPropagation();
+        window.RuleEditor?.hideModal?.();
+      } else if (wizardVisible) {
+        event.preventDefault();
+        event.stopPropagation();
+        window.ConfigWizard?.hide?.();
+      }
+    } catch {}
+  }, true);
+
   // 主要控件
   $('#rl-enabled').on('change', function () {
     UIState.isExtensionEnabled = $(this).prop('checked');
@@ -786,10 +1122,16 @@ function setupEventHandlers() {
 
   $('#rl-sdc-export-config').on('click', function () {
     try {
-      const settings = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
+      const currentSettings = getCurrentSettingsObject();
+      const settings = getFeatureSettings(currentSettings);
+      const profileCollection = readStructureProfiles(currentSettings);
       const exportSource = $('#rl-sdc-calendar-source').val() || settings.sdcCalendarSource;
       const localCustomText = $('#rl-sdc-custom-calendar').val() || settings.sdcCustomCalendarJson;
       const payload = createStructureSettingsExport({
+        ...currentSettings,
+        structureProfilesVersion: profileCollection.version,
+        structureProfiles: profileCollection.profiles,
+        structureProfileId: profileCollection.activeProfileId,
         removeLeakedReasoning: $('#rl-remove-leaked-reasoning').prop('checked') === true,
         repairSdcBoundary: $('#rl-repair-sdc-boundary').prop('checked') === true,
         repairDetailsOrder: $('#rl-repair-details-order').prop('checked') === true,
@@ -815,19 +1157,37 @@ function setupEventHandlers() {
     }
   });
 
+  // A file input must stay attached while the native picker is open. A
+  // detached input still fires a filechooser event, but the browser automation
+  // backend then has no attached node to receive the selected file. Reuse one
+  // hidden, offscreen input instead of creating a detached node per click.
+  function ensureStructureImportInput() {
+    let input = document.getElementById('rl-structure-import-file');
+    if (input) return input;
+    input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'rl-structure-import-file';
+    input.accept = '.json,application/json';
+    input.tabIndex = -1;
+    input.setAttribute('aria-hidden', 'true');
+    input.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(input);
+    return input;
+  }
+
   $('#rl-sdc-import-config').on('click', function () {
     try {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json,application/json';
+      const input = ensureStructureImportInput();
+      input.value = '';
       input.onchange = event => {
         const file = event.target.files?.[0];
         if (!file) return;
         const reader = new FileReader();
         reader.onload = e => {
           try {
-            const current = getFeatureSettings((__getCtx()?.extensionSettings || extension_settings)?.[extensionName] || {});
-            const imported = importStructureSettingsText(e.target.result, current);
+            const currentSettings = getCurrentSettingsObject();
+            const current = getFeatureSettings(currentSettings);
+            const imported = importStructureSettingsText(e.target.result, currentSettings);
             if (!imported.ok) throw new Error(imported.error);
             const next = imported.settings;
             $('#rl-sdc-custom-calendar').val(customJsonForTextarea(next.sdcCustomCalendarJson));
@@ -838,12 +1198,18 @@ function setupEventHandlers() {
             $('#rl-details-monologue-keyword').val(next.detailsMonologueKeyword);
             $('#rl-details-choices-keyword').val(next.detailsChoicesKeyword);
             $('#rl-sdc-advance-minutes').val(next.sdcAdvanceMinutes);
+            Object.assign(currentSettings, {
+              structureProfilesVersion: next.structureProfilesVersion,
+              structureProfiles: next.structureProfiles,
+              structureProfileId: next.structureProfileId,
+            });
+            try { structureProfileUI.refreshFromSettings({ preserveDraft: false }); } catch {}
             updateCalendarCustomVisibility();
             saveSettings();
-            window.toastr?.success('结构清理/历法/折叠块配置已导入并保存', '响应检查器');
+            window.toastr?.success('结构档案/历法/折叠块配置已导入并保存', '响应检查器');
           } catch (error) {
             console.error('导入结构清理配置失败:', error);
-            window.toastr?.error(`导入失败：${error.message}`, '响应检查器', { timeOut: 6000 });
+            window.toastr?.error(formatErrorForToast('导入失败：', error), '响应检查器', { timeOut: 6000, escapeHtml: false });
           }
         };
         reader.readAsText(file);
@@ -1123,18 +1489,21 @@ jQuery(async () => {
       editorHtml = await $.get(`${extensionFolderPath}/presentation/templates/rule-editor.html`);
     }
 
-    // 🔒 添加到扩展设置面板（右列优先，缺失则回退左列）
+    // 1.4.8: 主设置 UI 只有一个共享 DOM，位于专用可访问浮层；
+    // 扩展抽屉只保留小启动器，wand 菜单再增加一个明确入口。
+    $('body').append(editorHtml);
+    setupLaunchers(settingsHtml);
     const $right = $('#extensions_settings2');
     const $left = $('#extensions_settings');
     const $target = $right.length ? $right : $left;
     if ($target && $target.length) {
-      $target.append(settingsHtml);
-      console.info('[Response Linter] settings appended to', $target.attr('id')||'unknown');
+      installDrawerLauncher($target[0]);
+      console.info('[Response Linter] drawer launcher appended to', $target.attr('id') || 'unknown');
     } else {
-      console.warn('未找到扩展设置面板容器，尝试直接附加到body');
-      $('body').append(settingsHtml);
+      console.warn('[Response Linter] 未找到扩展设置面板容器，退回 body 启动器');
+      installDrawerLauncher(document.body);
     }
-    $('body').append(editorHtml);
+    installWandLauncher({ attempts: 16, delayMs: 250 });
     console.log('✅ HTML模板加载完成');
 
     // 🆕 尝试模块化初始化
@@ -1175,6 +1544,27 @@ jQuery(async () => {
       setupEventHandlers();
       setupBackendEventHandlers();
     }
+
+    // 斜杠命令必须在 Quick Reply 安装之前注册；API 缺失时只在有界窗口内重试。
+    startQuickReplySurface();
+    try {
+      const qctx = __getCtx();
+      const qes = qctx?.eventSource || window.eventSource;
+      const appReady = (qctx?.eventTypes || qctx?.event_types)?.APP_READY;
+      if (qes && appReady && typeof qes.once === 'function') {
+        qes.once(appReady, () => { startQuickReplySurface(); ensureCalendarWatch(); refreshCalendarStatus(); });
+      }
+    } catch {}
+    // 面板打开时也执行一次有界检查（不注册永久轮询）。
+    document.addEventListener('click', event => {
+      if (event.target?.closest?.('#rl-open-main-panel, #rl-wand-button')) {
+        if (qrAutoStopped) {
+          qrAutoAttempts = 0;
+          qrAutoStopped = false;
+          scheduleQrAutoCheck(150);
+        }
+      }
+    }, true);
 
     // 诊断详情弹窗：展示模块化初始化状态（时间戳 / 已加载模块 / 错误信息）
     async function showModuleInitDetails() {
@@ -1289,6 +1679,8 @@ jQuery(async () => {
           if (et.CHAT_CHANGED && typeof es.on === 'function') {
             es.on(et.CHAT_CHANGED, () => {
               try { UIState.updateStatistics(); UIState.updateStatusIndicator(); } catch (e) {}
+              try { refreshCalendarStatus(); } catch (e) {}
+              try { refreshQuickReplyStatus(); } catch (e) {}
             });
           }
           listenersBound = true;

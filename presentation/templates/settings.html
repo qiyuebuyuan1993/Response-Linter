@@ -1,12 +1,5 @@
 <div class="response-linter-settings">
-  <div class="inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header">
-      <b>响应检查器</b>
-      <span id="rl-status-indicator" class="rl-status-indicator active" title="扩展状态">●</span>
-      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-    </div>
-    <div class="inline-drawer-content">
-      <!-- 使用指引部分 -->
+  <!-- 使用指引部分 -->
       <div class="rl-section">
         <div class="rl-usage-guide">
           <div class="rl-guide-header">
@@ -102,60 +95,133 @@
 
       <hr class="sysHR" />
 
+      <!-- 结构配置档案（普通表单，不要求用户编辑 JSON） -->
+      <div class="rl-section rl-profile-section">
+        <h4>回复结构配置档案</h4>
+        <small class="rl-help-text">一个档案定义正文分隔符、时间模式、外部标记和末尾结构块的顺序。旧版设置会自动生成“旧版 SDC / content / details”预设，不会重置规则或开关。升级后的设置会写回版本化档案列表。</small>
+
+        <div class="rl-profile-toolbar">
+          <label for="rl-profile-select">当前档案</label>
+          <select id="rl-profile-select" class="text_pole"></select>
+          <button id="rl-profile-new" class="menu_button secondary small" type="button">新建</button>
+          <button id="rl-profile-copy" class="menu_button secondary small" type="button">复制为自定义</button>
+          <button id="rl-profile-remove" class="menu_button secondary small" type="button">删除自定义档案</button>
+          <button id="rl-profile-restore-legacy" class="menu_button secondary small" type="button">恢复/选择旧版预设</button>
+        </div>
+        <div id="rl-profile-messages" class="rl-profile-messages" role="status" aria-live="polite"></div>
+
+        <div id="rl-profile-editor" class="rl-profile-editor">
+          <div id="rl-profile-readonly-note" class="rl-help-text" style="display:none">旧版预设用于兼容旧设置，不能直接编辑；请先“复制为自定义”。</div>
+          <div class="rl-form-group">
+            <label for="rl-profile-name">档案名称</label>
+            <input id="rl-profile-name" type="text" class="text_pole" maxlength="60" spellcheck="false" />
+          </div>
+          <div class="rl-profile-grid">
+            <div class="rl-form-group">
+              <label for="rl-profile-body-open">正文开始分隔符</label>
+              <input id="rl-profile-body-open" type="text" class="text_pole" spellcheck="false" placeholder="&lt;content&gt;" />
+              <small class="rl-help-text">HTML 标签名大小写不敏感并可带属性；非标签字面分隔符区分大小写、按原文精确匹配。使用千千结/构画时，请同时在对应插件中配置相同的正文标签；本扩展不会自动修改它们的共享设置，也不会假设标签配置已同步。</small>
+            </div>
+            <div class="rl-form-group">
+              <label for="rl-profile-body-close">正文结束分隔符</label>
+              <input id="rl-profile-body-close" type="text" class="text_pole" spellcheck="false" placeholder="&lt;/content&gt;" />
+            </div>
+          </div>
+          <div class="rl-form-group">
+            <label for="rl-profile-time-mode">时间模式</label>
+            <select id="rl-profile-time-mode">
+              <option value="none">无时间标记（仅修复正文边界）</option>
+              <option value="sdc">SDC 时间注释</option>
+              <option value="custom">自定义时间模板</option>
+            </select>
+          </div>
+          <div id="rl-profile-custom-time" class="rl-profile-custom-time" style="display:none">
+            <div class="rl-form-group">
+              <label for="rl-profile-time-start">开始标记模板</label>
+              <input id="rl-profile-time-start" type="text" class="text_pole" spellcheck="false" placeholder="【{date} · {weekday} · {time}】" />
+            </div>
+            <div class="rl-form-group">
+              <label for="rl-profile-time-end">结束标记模板</label>
+              <input id="rl-profile-time-end" type="text" class="text_pole" spellcheck="false" placeholder="【结束 · {date} · {weekday} · {time}】" />
+            </div>
+            <small class="rl-help-text">模板必须以实际分隔符开头和结尾，并各包含且仅包含一个 {date}、{weekday}、{time}；占位符之间要有字面分隔符。日期格式与历法推进仍由历法引擎负责，不使用用户正则或可执行脚本。</small>
+          </div>
+          <div class="rl-form-group">
+            <label for="rl-profile-auxiliaries">外部辅助标记（每行一个，可选）</label>
+            <textarea id="rl-profile-auxiliaries" class="text_pole" rows="3" spellcheck="false" placeholder="&lt;版权水印&gt;&#10;&lt;details&gt;"></textarea>
+            <small class="rl-help-text">正文结束与时间结束标记会移动到最先出现的已配置外部标记之前；分隔线会保留在外部区域。留空时只按正文结束分隔符定位。</small>
+          </div>
+
+          <div class="rl-form-group">
+            <label>末尾结构块顺序（从上到下为期望顺序）</label>
+            <div id="rl-profile-blocks-list" class="rl-profile-blocks-list"></div>
+            <button id="rl-profile-add-block" class="menu_button secondary small" type="button"><i class="fa-solid fa-plus"></i> 添加结构块</button>
+            <small class="rl-help-text">只重排完整、唯一的顶层目标块到它们原本占用的位置；中间文字、未知块和末尾附加块不移动。共用同一开始标签时，必须填写直接标题元素（如 summary）和标题关键词。没有拖拽要求，使用上移/下移按钮排序。</small>
+          </div>
+
+          <div class="rl-form-actions">
+            <button id="rl-profile-save" class="menu_button" type="button">保存档案</button>
+            <button id="rl-profile-discard" class="menu_button secondary" type="button">放弃编辑</button>
+          </div>
+        </div>
+      </div>
+
+      <hr class="sysHR" />
+
       <!-- 结构清理（默认关闭；独立于用户规则） -->
       <div class="rl-section rl-structure-section">
         <h4>回复结构清理</h4>
-        <small class="rl-help-text">以下开关默认关闭，不依赖“验证规则”，也不会重置你已有的规则。手动修复按钮会使用本段设置；自动执行仍受“启用智能自动修复”开关控制。</small>
+        <small class="rl-help-text">以下开关独立于“验证规则”，不会重置你已有的规则。正文边界与末尾结构块按上方当前档案执行；普通规则仍由各自的必需内容/修复策略负责。手动修复始终可用，自动执行仍受“启用智能自动修复”开关控制。</small>
 
         <div class="rl-control-group">
           <label class="checkbox_label" for="rl-remove-leaked-reasoning">
             <input id="rl-remove-leaked-reasoning" type="checkbox" />
             <span>清理泄漏的推理块</span>
           </label>
-          <small class="rl-help-text">删除完整的 &lt;think&gt;…&lt;/think&gt;、&lt;thinking&gt;…&lt;/thinking&gt; 块。未闭合块只有在后面出现明确 &lt;content&gt; 或 SDC-start 时才删除到该锚点前；否则保留并警告。代码围栏/行内代码绝不修改。</small>
+          <small class="rl-help-text">删除完整的 &lt;think&gt;…&lt;/think&gt;、&lt;thinking&gt;…&lt;/thinking&gt; 块。未闭合块只有在后面出现当前档案配置的正文开始分隔符或时间开始标记时才删除到该锚点前；否则保留并警告。代码围栏/行内代码绝不修改。</small>
         </div>
 
         <div class="rl-control-group">
           <label class="checkbox_label" for="rl-repair-sdc-boundary">
             <input id="rl-repair-sdc-boundary" type="checkbox" />
-            <span>修复 SDC / 正文边界</span>
+            <span>修复正文 / 时间边界</span>
           </label>
-          <small class="rl-help-text">仅处理含 SDC 标记与 &lt;content&gt; 的回复：把结束注释与 &lt;/content&gt; 移回正文末尾（水印/分隔线/&lt;details&gt; 之前，结束注释必须紧贴 &lt;/content&gt;）。缺少结束注释时，才按下方历法推进时间合成；结构重复、缺少起点或无法推断日期时只警告，不猜测。无法合成时会提示手动补全结束注释的日期、星期与时间。</small>
+          <small class="rl-help-text">按当前档案的正文开始/结束分隔符与时间模式处理：有独立时间结束标记时移动到正文结束前，已有标记逐字节保留；只有缺少结束标记时才按历法推进时间合成。无时间模式只修复正文结束位置。所有可识别的外部标记/结构块之前为外部区域，重复、缺失起点或日期无效时只警告，不猜测。</small>
         </div>
 
         <div class="rl-control-group">
           <label class="checkbox_label" for="rl-repair-details-order">
             <input id="rl-repair-details-order" type="checkbox" />
-            <span>修复正文外折叠块顺序与配对</span>
+            <span>修复正文外结构块顺序与配对</span>
           </label>
-          <small class="rl-help-text">仅在已有 SDC-start / SDC-end、且 SDC-end 与 &lt;/content&gt; 之间只有空白时处理 &lt;/content&gt; 之后的折叠块。只交换“内心独白”和“你的选择是”两个完整顶层块；两者之间的普通文字、未知折叠块和末尾新增块均原样保留，不重建正文 HTML。缺少结束标签时，只有在下一折叠块的标题能明确证明并列关系、且末尾没有归属不明的文字时才补闭合；结构不明确时只警告并保留原文。若目标折叠块仍在 &lt;/content&gt; 之前，请先开启“修复 SDC / 正文边界”，本开关不会替你移动正文边界。代码围栏、行内代码、&lt;code&gt;/&lt;pre&gt; 和 HTML 注释中的示例不会被当成真实折叠块。</small>
+          <small class="rl-help-text">按当前档案的末尾结构块顺序，只重排完整、唯一的顶层目标块到其原占位；中间文字、未知块、未配置嵌套和末尾附加块原样保留。共用同一开始标签时按直接标题关键词识别；缺少结束标签时，只有未闭合块和紧邻的完整块都是本档案中不同且并列的末尾结构块时，才补闭合。目标块仍在正文结束分隔符内时只警告，本开关不会替你移动正文边界。代码围栏、行内代码、&lt;code&gt;/&lt;pre&gt; 和 HTML 注释中的示例不参与。</small>
         </div>
 
         <div class="rl-control-group">
           <div class="rl-calendar-row">
-            <label for="rl-details-monologue-keyword">内心独白标题关键词</label>
+            <label for="rl-details-monologue-keyword">旧版预设：内心独白标题关键词</label>
             <input id="rl-details-monologue-keyword" type="text" class="text_pole" value="内心独白" spellcheck="false" />
           </div>
           <div class="rl-calendar-row">
-            <label for="rl-details-choices-keyword">你的选择是标题关键词</label>
+            <label for="rl-details-choices-keyword">旧版预设：你的选择是标题关键词</label>
             <input id="rl-details-choices-keyword" type="text" class="text_pole" value="你的选择是" spellcheck="false" />
           </div>
-          <small class="rl-help-text">按折叠块直接标题中的纯文本匹配，首尾空白会被去掉；标题中关键词周围的 emoji、标点可以保留。两个关键词不能为空且不能相同；非法值会保留上次有效设置。标题同时匹配两个关键词或出现重复目标时只警告，不做有歧义的交换。</small>
+          <small class="rl-help-text">这两个字段只作用于“旧版 SDC / content / details”预设，不影响自定义档案；自定义档案的标题元素/关键词在上方档案编辑器中配置。按直接标题中的纯文本匹配；两个关键词不能为空且不能相同，非法值会保留上次有效设置。</small>
         </div>
 
         <div class="rl-control-group rl-calendar-controls">
-          <label for="rl-sdc-calendar-source">SDC 历法来源（仅用于边界修复合成结束时间）</label>
+          <label for="rl-sdc-calendar-source">结构档案时间标记的历法来源</label>
           <select id="rl-sdc-calendar-source">
             <option value="gouhua">构画 / 当前聊天（只读）</option>
             <option value="four-seasons-28">四季 28 日预设（春夏秋冬各 28 天）</option>
             <option value="custom">自定义历法 JSON</option>
           </select>
-          <small class="rl-help-text">“构画 / 当前聊天”只读当前聊天在构画中设置的历法，不会修改构画数据；切换聊天或修改构画历法后，下一次修复立即使用新历法。只有需要补写缺失的结束注释时才读取历法；移动已有标记不会因历法缺失而报警。</small>
+          <small class="rl-help-text">“构画 / 当前聊天”会自动只读当前聊天的历法，不修改构画数据；切换聊天、打开面板或收到构画历法变更事件时自动刷新状态。已有的四季预设/自定义来源不会被自动替换。只有需要补写缺失结束标记时才读取历法；移动已有标记或时间模式为“无”时不会产生历法错误。</small>
 
           <div class="rl-calendar-row">
             <label for="rl-sdc-advance-minutes">推进分钟</label>
             <input id="rl-sdc-advance-minutes" type="number" min="1" max="10080" step="1" value="10" class="text_pole" />
-            <span class="rl-help-text">默认 10 分钟；用于从 SDC-start 合成缺失的 SDC-end。</span>
+            <span class="rl-help-text">默认 10 分钟；仅在缺少时间结束标记时从开始标记推进并合成。</span>
           </div>
 
           <div class="rl-calendar-row rl-calendar-actions">
@@ -177,6 +243,18 @@
             <small class="rl-help-text">按顺序填写月份名称与每月天数、按顺序填写星期名称、日期格式必须包含 {year}、{month}、{day}（可选用 {era} 与纪年名）。可选择自定义推进分钟。非法 JSON、重复月名、越界天数、重复日期占位符、未知类型或未支持的闰月规则都不会覆盖上一次有效配置。</small>
           </div>
         </div>
+      </div>
+
+      <hr class="sysHR" />
+
+      <!-- 捆绑 Quick Reply 修复按钮 -->
+      <div class="rl-section rl-quickreply-section">
+        <h4>Quick Reply 修复按钮</h4>
+        <div class="rl-quickreply-status-row">
+          <span id="rl-qr-status-text" class="rl-calendar-status" role="status" aria-live="polite">尚未检查 Quick Reply 安装状态。</span>
+          <button id="rl-qr-install" class="menu_button secondary small" type="button">手动重试 / 恢复按钮</button>
+        </div>
+        <small class="rl-help-text">只会安装本扩展自己的一个 Quick Reply 按钮，不替换同名组、不改动你的自定义按钮，也不会自动发送消息或生成回复。按钮执行与“手动修复最新消息”相同的手动修复；首次安装会把本组设为可见全局组，之后不会自动重装你已删除的按钮。Quick Reply 扩展被禁用时不会安装，也不会替你启用。</small>
       </div>
 
       <hr class="sysHR" />
@@ -292,6 +370,4 @@
           重置统计
         </button>
       </div>
-    </div>
-  </div>
 </div>
