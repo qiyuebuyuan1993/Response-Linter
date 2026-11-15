@@ -1,8 +1,10 @@
 // Response Linter 修复协调器
 // 协调验证失败事件和修复执行，管理修复流程和用户交互
 
-import { getFreshContext, isStreamingContext } from './host-context.js';
+import { getFreshContext, isStreamingContext, isCurrentAutoTarget } from './host-context.js';
 import { messageModifier } from './message-modifier.js';
+import { buildRepairPlan } from './repair-service.js';
+import { withMessageWriteLease } from './message-write-lease.js';
 
 /**
  * 修复任务数据结构
@@ -172,8 +174,38 @@ export class FixCoordinator {
    * @param {FixTask} task - 修复任务
    */
   async _processFixTask(task) {
+    const ctx = getFreshContext();
+    const chat = task.chat || ctx?.chat;
+    return withMessageWriteLease(chat, async lease => {
+      if (getFreshContext()?.chat !== chat || messageModifier._getMessage(task.messageId) !== task.message ||
+          (Number.isInteger(task.message?.swipe_id) ? task.message.swipe_id : null) !== task.swipeId) {
+        return { success: false, reason: '聊天或候选回复已切换，本次修复已取消' };
+      }
+      if (task.autoTarget) {
+        if (!isCurrentAutoTarget(task.autoTarget)) return { success: false, reason: '自动修复已过期，未修改历史消息' };
+        const settings = task.readSettings?.() || task.settings || {};
+        if (!this.isEnabled || !this.autoFixEnabled || settings.enabled !== true || settings.autoFix !== true) {
+          return { success: false, reason: '自动修复已关闭，本次任务已取消' };
+        }
+        // The other plugin may have completed a rewrite while we waited.
+        // Compute from the latest text only after acquiring the shared lock.
+        const fresh = buildRepairPlan({ messageId: task.messageId, settings,
+          ctx: getFreshContext(), automatic: true });
+        if (!fresh.success) return { success: false, reason: fresh.reason, warnings: fresh.warnings };
+        Object.assign(task, { content: fresh.content, plannedContent: fresh.fixedContent,
+          expectedState: fresh.expectedState, fixStrategy: fresh.strategy,
+          strategies: fresh.strategies, warnings: fresh.warnings });
+      }
+      return this._processFixTaskLocked(task, lease);
+    });
+  }
+
+  async _processFixTaskLocked(task, lease) {
     try {
       if (!this.isEnabled) return { success: false, reason: '扩展未启用' };
+      if (task.autoTarget && !isCurrentAutoTarget(task.autoTarget)) {
+        return { success: false, reason: '新消息或新一轮生成已开始，自动修复已取消' };
+      }
       if (isStreamingContext(getFreshContext())) {
         return { success: false, reason: '当前回复仍在流式生成中，已跳过修复，请等待生成完成。' };
       }
@@ -216,7 +248,8 @@ export class FixCoordinator {
           task.fixStrategy,
           this.requireConfirmation,
           task.content,
-          { warnings: fixResult.metadata?.warnings || task.warnings || [] },
+          { warnings: fixResult.metadata?.warnings || task.warnings || [],
+            expectedState: task.expectedState, autoTarget: task.autoTarget, lease },
         );
 
         if (modificationResult.success) {
@@ -454,6 +487,11 @@ export class FixCoordinator {
       revalidate: false,
       fixStrategy: plan.strategy || 'structure',
       message: plan.message,
+      expectedState: plan.expectedState,
+      autoTarget: plan.autoTarget,
+      chat: plan.autoTarget?.chat || getFreshContext()?.chat,
+      settings: plan.settings?.raw || plan.settings,
+      readSettings: plan.readSettings,
       swipeId: Number.isInteger(plan.swipeId) ? plan.swipeId : null,
       priority: Number.isFinite(options.priority) ? options.priority : (options.manual ? 100 : 60),
       createdAt: new Date(),

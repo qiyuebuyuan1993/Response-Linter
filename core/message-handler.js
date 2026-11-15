@@ -1,5 +1,5 @@
 // Response Linter 消息处理器模块
-import { getFreshContext, isStreamingContext } from './host-context.js';
+import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, noteGenerationStarted } from './host-context.js';
 
 // 负责监听SillyTavern事件、提取消息内容和协调验证流程
 
@@ -26,13 +26,31 @@ export class MessageHandler {
     this.rebindTimer = null; // 绑定失败时的周期性重试定时器
     this.domObserver = null; // DOM 观察器回退方案
     this.writingMessages = new Set();
+    this.dirtyDuringWrite = new Map();
+    this.lastStates = new Map();
+    this.deferredEvents = new Map();
     document.addEventListener('responseLinter.messageWriteStarted', event => {
       this.writingMessages.add(String(event.detail.messageId));
     });
     document.addEventListener('responseLinter.messageWriteFinished', event => {
       const id = String(event.detail.messageId);
-      this.lastContent.set(id, event.detail.content.trim());
       this.writingMessages.delete(id);
+      const dirty = this.dirtyDuringWrite.get(id);
+      this.dirtyDuringWrite.delete(id);
+      const ctx = safeGetContext();
+      if (event.detail.success && ctx?.chat === event.detail.chat &&
+          sameMessageState(event.detail.message, event.detail.committedState)) {
+        this.lastContent.set(id, event.detail.content);
+        this.lastStates.set(id, { message: event.detail.message, chat: ctx.chat,
+          chatId: chatIdentity(ctx), state: event.detail.committedState });
+      }
+      if (dirty && dirty.chat === ctx?.chat && dirty.chatId === chatIdentity(ctx) &&
+          this.extractMessage(id)?.raw === dirty.message) {
+        // Re-read after the current write. Self-render events deduplicate, while
+        // a competing plugin's changed text must not be marked as processed.
+        this.lastHandledAt.delete(id);
+        void this._handleMessageRendered(id);
+      }
     });
   }
 
@@ -116,6 +134,10 @@ export class MessageHandler {
       }
 
       // 监听AI消息渲染完成事件
+      if (sys.event_types.GENERATION_STARTED) {
+        sys.eventSource.on(sys.event_types.GENERATION_STARTED, noteGenerationStarted);
+        this.eventListeners.push({ event: sys.event_types.GENERATION_STARTED, handler: noteGenerationStarted });
+      }
       const messageRenderedHandler = (messageId, type) => {
         try { console.log('[Response Linter] CHARACTER_MESSAGE_RENDERED', messageId, type); } catch {}
         this._handleMessageRendered(String(messageId));
@@ -185,6 +207,10 @@ export class MessageHandler {
     if (!this.isListening) {
       return;
     }
+    for (const timer of this.deferredEvents.values()) clearTimeout(timer);
+    this.deferredEvents.clear();
+    this.dirtyDuringWrite.clear();
+    this.processingQueue.length = 0;
 
     try {
       const ctx = safeGetContext();
@@ -207,17 +233,34 @@ export class MessageHandler {
    * @param {string} messageId - 消息ID
    */
   async _handleMessageRendered(messageId) {
-    if (this.writingMessages.has(String(messageId))) return;
+    messageId = String(messageId);
+    const ctx = safeGetContext();
+    const target = { messageId, message: this.extractMessage(messageId)?.raw,
+      chat: ctx?.chat, chatId: chatIdentity(ctx) };
+    if (!target.message) return;
+    if (this.writingMessages.has(messageId)) {
+      this.dirtyDuringWrite.set(messageId, target);
+      return;
+    }
     // 内容级去重由 _processMessage 负责；这里仅用 processedMessages 作为极端护栏
     // 防抖：短时间内重复事件直接丢弃（防止同源多事件风暴）
     const lastAt = this.lastHandledAt.get(messageId) || 0;
     if (Date.now() - lastAt < 200) {
+      clearTimeout(this.deferredEvents.get(messageId));
+      this.deferredEvents.set(messageId, setTimeout(() => {
+        this.deferredEvents.delete(messageId);
+        const fresh = safeGetContext();
+        if (target.chat === fresh?.chat && target.chatId === chatIdentity(fresh) &&
+            this.extractMessage(messageId)?.raw === target.message) {
+          void this._handleMessageRendered(messageId);
+        }
+      }, Math.max(1, 200 - (Date.now() - lastAt))));
       return;
     }
 
     try {
       // 入队处理
-      this.processingQueue.push(messageId);
+      this.processingQueue.push(target);
 
       // 如果没有正在处理，开始处理队列
       if (!this.isProcessing) {
@@ -238,7 +281,11 @@ export class MessageHandler {
     this.isProcessing = true;
 
     while (this.processingQueue.length > 0) {
-      const messageId = this.processingQueue.shift();
+      const target = this.processingQueue.shift();
+      const { messageId } = target;
+      const ctx = safeGetContext();
+      if (target.chat !== ctx?.chat || target.chatId !== chatIdentity(ctx) ||
+          this.extractMessage(messageId)?.raw !== target.message) continue;
 
       try {
         const ok = await this._processMessage(messageId);
@@ -250,7 +297,11 @@ export class MessageHandler {
           if (count <= 3) {
             this.retryCounts.set(messageId, count);
             // 稍后重试（100ms）
-            setTimeout(() => this._handleMessageRendered(messageId), 100);
+            setTimeout(() => {
+              const fresh = safeGetContext();
+              if (target.chat === fresh?.chat && target.chatId === chatIdentity(fresh) &&
+                  this.extractMessage(messageId)?.raw === target.message) void this._handleMessageRendered(messageId);
+            }, 100);
           } else {
             this.retryCounts.delete(messageId);
           }
@@ -272,7 +323,12 @@ export class MessageHandler {
    * @param {string} messageId - 消息ID
    */
   async _processMessage(messageId) {
-    if (this.writingMessages.has(String(messageId))) return true;
+    if (this.writingMessages.has(String(messageId))) {
+      const ctx = safeGetContext();
+      this.dirtyDuringWrite.set(String(messageId), { message: this.extractMessage(messageId)?.raw,
+        chat: ctx?.chat, chatId: chatIdentity(ctx) });
+      return true;
+    }
     const messageData = this.extractMessage(messageId);
 
     if (!messageData) {
@@ -291,8 +347,12 @@ export class MessageHandler {
     }
 
     // 内容去重：仅当内容发生变化时才继续后续流程
-    const prev = this.lastContent.get(messageId);
-    const changed = prev !== messageData.content;
+    const ctx = safeGetContext();
+    const prev = this.lastStates.get(messageId);
+    const changed = !this.lastContent.has(messageId) || !prev || prev.chat !== ctx?.chat || prev.chatId !== chatIdentity(ctx) ||
+      prev.message !== messageData.raw || !sameMessageState(messageData.raw, prev.state);
+    this.lastStates.set(messageId, { message: messageData.raw, chat: ctx?.chat,
+      chatId: chatIdentity(ctx), state: snapshotMessage(messageData.raw) });
     this.lastContent.set(messageId, messageData.content);
     this.lastHandledAt.set(messageId, Date.now());
 
@@ -348,7 +408,7 @@ export class MessageHandler {
         return null;
       }
 
-      const content = (message.extra?.display_text ?? message.mes ?? '').trim();
+      const content = message.extra?.display_text ?? message.mes ?? '';
       const resolvedId = (message.id ?? (idx >= 0 ? String(idx) : String(messageId)));
 
       return {
