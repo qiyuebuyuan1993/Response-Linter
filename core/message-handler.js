@@ -1,5 +1,5 @@
 // Response Linter 消息处理器模块
-import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, noteGenerationStarted } from './host-context.js';
+import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, currentGenerationEpoch } from './host-context.js';
 
 // 负责监听SillyTavern事件、提取消息内容和协调验证流程
 
@@ -29,6 +29,9 @@ export class MessageHandler {
     this.dirtyDuringWrite = new Map();
     this.lastStates = new Map();
     this.deferredEvents = new Map();
+    document.addEventListener('responseLinter.generationSettled', event => {
+      if (this.isListening) { this.lastHandledAt.delete(String(event.detail.messageId)); void this._handleMessageRendered(event.detail.messageId); }
+    });
     document.addEventListener('responseLinter.messageWriteStarted', event => {
       this.writingMessages.add(String(event.detail.messageId));
     });
@@ -45,7 +48,7 @@ export class MessageHandler {
           chatId: chatIdentity(ctx), state: event.detail.committedState });
       }
       if (dirty && dirty.chat === ctx?.chat && dirty.chatId === chatIdentity(ctx) &&
-          this.extractMessage(id)?.raw === dirty.message) {
+          this.extractMessage(id)?.raw === dirty.message && dirty.swipeId === dirty.message?.swipe_id && dirty.epoch === currentGenerationEpoch()) {
         // Re-read after the current write. Self-render events deduplicate, while
         // a competing plugin's changed text must not be marked as processed.
         this.lastHandledAt.delete(id);
@@ -134,10 +137,6 @@ export class MessageHandler {
       }
 
       // 监听AI消息渲染完成事件
-      if (sys.event_types.GENERATION_STARTED) {
-        sys.eventSource.on(sys.event_types.GENERATION_STARTED, noteGenerationStarted);
-        this.eventListeners.push({ event: sys.event_types.GENERATION_STARTED, handler: noteGenerationStarted });
-      }
       const messageRenderedHandler = (messageId, type) => {
         try { console.log('[Response Linter] CHARACTER_MESSAGE_RENDERED', messageId, type); } catch {}
         this._handleMessageRendered(String(messageId));
@@ -183,10 +182,8 @@ export class MessageHandler {
             sys.eventSource.on(sys.event_types.MESSAGE_UPDATED, messageRenderedHandler);
             this.eventListeners.push({ event: sys.event_types.MESSAGE_UPDATED, handler: messageRenderedHandler });
           }
-          if (sys.event_types?.MESSAGE_SWIPED) {
-            sys.eventSource.on(sys.event_types.MESSAGE_SWIPED, messageRenderedHandler);
-            this.eventListeners.push({ event: sys.event_types.MESSAGE_SWIPED, handler: messageRenderedHandler });
-          }
+          // Swipe navigation only invalidates previews in repair-lifecycle.
+          // It is not evidence of a completed new response.
         }
       } catch {}
 
@@ -236,7 +233,8 @@ export class MessageHandler {
     messageId = String(messageId);
     const ctx = safeGetContext();
     const target = { messageId, message: this.extractMessage(messageId)?.raw,
-      chat: ctx?.chat, chatId: chatIdentity(ctx) };
+      chat: ctx?.chat, chatId: chatIdentity(ctx), epoch: currentGenerationEpoch() };
+    target.swipeId = target.message?.swipe_id;
     if (!target.message) return;
     if (this.writingMessages.has(messageId)) {
       this.dirtyDuringWrite.set(messageId, target);
@@ -251,7 +249,7 @@ export class MessageHandler {
         this.deferredEvents.delete(messageId);
         const fresh = safeGetContext();
         if (target.chat === fresh?.chat && target.chatId === chatIdentity(fresh) &&
-            this.extractMessage(messageId)?.raw === target.message) {
+            this.extractMessage(messageId)?.raw === target.message && target.swipeId === target.message?.swipe_id && target.epoch === currentGenerationEpoch()) {
           void this._handleMessageRendered(messageId);
         }
       }, Math.max(1, 200 - (Date.now() - lastAt))));
@@ -285,7 +283,7 @@ export class MessageHandler {
       const { messageId } = target;
       const ctx = safeGetContext();
       if (target.chat !== ctx?.chat || target.chatId !== chatIdentity(ctx) ||
-          this.extractMessage(messageId)?.raw !== target.message) continue;
+          this.extractMessage(messageId)?.raw !== target.message || target.swipeId !== target.message?.swipe_id || target.epoch !== currentGenerationEpoch()) continue;
 
       try {
         const ok = await this._processMessage(messageId);
@@ -300,7 +298,7 @@ export class MessageHandler {
             setTimeout(() => {
               const fresh = safeGetContext();
               if (target.chat === fresh?.chat && target.chatId === chatIdentity(fresh) &&
-                  this.extractMessage(messageId)?.raw === target.message) void this._handleMessageRendered(messageId);
+                  this.extractMessage(messageId)?.raw === target.message && target.swipeId === target.message?.swipe_id && target.epoch === currentGenerationEpoch()) void this._handleMessageRendered(messageId);
             }, 100);
           } else {
             this.retryCounts.delete(messageId);
@@ -326,7 +324,7 @@ export class MessageHandler {
     if (this.writingMessages.has(String(messageId))) {
       const ctx = safeGetContext();
       this.dirtyDuringWrite.set(String(messageId), { message: this.extractMessage(messageId)?.raw,
-        chat: ctx?.chat, chatId: chatIdentity(ctx) });
+        chat: ctx?.chat, chatId: chatIdentity(ctx), swipeId: this.extractMessage(messageId)?.raw?.swipe_id, epoch: currentGenerationEpoch() });
       return true;
     }
     const messageData = this.extractMessage(messageId);

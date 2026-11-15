@@ -371,7 +371,8 @@ test('template and launcher expose only the streamlined entrances and controls',
   }
   assert.ok(html.indexOf('<details') < html.indexOf('rl-sdc-calendar-source'), 'calendar lives in a disclosure');
   assert.ok(html.indexOf('高级 / 帮助') < html.indexOf('rl-qr-install'), 'QR restore lives in advanced/help');
-  assert.equal(/rl-(add-rule|rules-list|template-thinking|config-wizard|diagnostics|stat-validations)/.test(html), false);
+  assert.equal(/rl-(add-rule|rules-list|template-thinking|config-wizard|stat-validations)/.test(html), false);
+  assert.ok(html.includes('id="rl-diagnostics"'), '1.4.13 adds privacy-safe lifecycle diagnostics without restoring legacy validation');
 
   const launcher = readFileSync(new URL('../presentation/modules/main-panel-ui.js', import.meta.url), 'utf8');
   assert.ok(launcher.includes('inline-drawer-toggle inline-drawer-header rl-drawer-launcher'));

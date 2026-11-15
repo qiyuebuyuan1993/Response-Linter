@@ -97,10 +97,10 @@ export class FixCoordinator {
    * @param {Object} eventData - 确认请求事件数据
    */
   _handleModificationConfirmationRequired(eventData) {
-    const { messageId, originalContent, newContent, strategy, warnings } = eventData;
+    const { messageId, originalContent, newContent, strategy, warnings, token } = eventData;
 
     // 触发UI确认对话框
-    this._showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings);
+    this._showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings, token);
   }
 
   /**
@@ -331,12 +331,13 @@ export class FixCoordinator {
    * @param {string} newContent - 新内容
    * @param {string} strategy - 修复策略
    */
-  _showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings = []) {
+  _showConfirmationDialog(messageId, originalContent, newContent, strategy, warnings = [], token) {
     // 创建确认对话框内容
     const dialogContent = this._createConfirmationDialog(messageId, originalContent, newContent, strategy, warnings);
 
     // 触发UI显示事件
     this._dispatchFixEvent('confirmationRequired', {
+      token,
       messageId,
       originalContent,
       newContent,
@@ -419,8 +420,8 @@ export class FixCoordinator {
    * @param {boolean} confirmed - 是否确认
    * @returns {Promise<Object>} 确认结果
    */
-  async confirmFix(messageId, confirmed) {
-    const result = await messageModifier.confirmModification(messageId, confirmed);
+  async confirmFix(messageId, confirmed, token = null) {
+    const result = await messageModifier.confirmModification(messageId, confirmed, token);
 
     if (confirmed && result.success) {
       this.statistics.successfulFixes++;

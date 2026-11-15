@@ -1,4 +1,4 @@
-// Response Linter 1.4.12 — streamlined structure-repair edition.
+// Response Linter 1.4.13 — streamlined structure-repair edition.
 // Only the three structure-repair features, editable reply-structure profiles,
 // calendar awareness, Quick Reply/wand/drawer entry points and manual/auto
 // repair/undo are active. Legacy generic validation rules are archived inertly
@@ -24,6 +24,8 @@ import {
   joinWarningToasts,
 } from './core/text-safety.js';
 import { structureProfileUI } from './presentation/modules/structure-profile-ui.js';
+import { openRepairPreview } from './presentation/modules/repair-preview-ui.js';
+import { setupDiagnosticsUI } from './presentation/modules/diagnostics-ui.js';
 import {
   installDrawerLauncher,
   installWandLauncher,
@@ -57,7 +59,7 @@ const __getCtx = () => getFreshContext();
 const extensionName = 'response-linter';
 const extensionFolderPath = new URL('.', import.meta.url).pathname.replace(/\/$/, '');
 
-try { console.info('[Response Linter] 1.4.12 streamlined index loaded'); } catch {}
+try { console.info('[Response Linter] 1.4.13 streamlined index loaded'); } catch {}
 
 function getSettingsRoot() {
   try {
@@ -615,6 +617,7 @@ function setupLaunchers(settingsHtml) {
     onQrRestore: () => { void restoreQuickReplyButton(); },
     onStatusText: () => '响应检查器',
   });
+  setupDiagnosticsUI(getCurrentSettingsObject);
   structureProfileUI.initialize({
     getSettings: getCurrentSettingsObject,
     persistProfiles: persistStructureProfiles,
@@ -729,11 +732,12 @@ async function loadSettings() {
 }
 
 // ===== preview/confirmation events =====
-let confirmationInFlight = false;
+let activeConfirmation = null;
 
 async function showStructureConfirmation(detail) {
-  if (!detail || confirmationInFlight) return;
-  confirmationInFlight = true;
+  if (!detail || !backendController?.isPreviewCurrent(detail.token)) return;
+  if (activeConfirmation?.token === detail.token) return;
+  activeConfirmation?.popup.close(false, true);
   const messageId = String(detail.messageId ?? '');
   const warnings = Array.isArray(detail.warnings) ? detail.warnings : [];
   const preview = String(detail.newContent ?? '');
@@ -755,42 +759,31 @@ async function showStructureConfirmation(detail) {
       <pre style="max-height:55vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);padding:10px;border-radius:4px;text-align:left;">${escapeHtml(preview)}</pre>
     </div>
   `;
-  const ctx = __getCtx() || {};
-  const popup = ctx.callGenericPopup || window.callGenericPopup;
-  const popupType = ctx.POPUP_TYPE?.CONFIRM ?? 'confirm';
-  const affirmative = ctx.POPUP_RESULT?.AFFIRMATIVE ?? true;
+  const popup = openRepairPreview(dialogHtml, () => backendController?.isPreviewCurrent(detail.token));
+  const entry = { token: detail.token, popup };
+  activeConfirmation = entry;
   let confirmed = false;
   try {
-    if (typeof popup === 'function') {
-      const result = await popup(dialogHtml, popupType, '确认修复', {
-        wide: true,
-        okButton: '应用修复',
-        cancelButton: '取消',
-      });
-      confirmed = result === affirmative || result === true || result === 1;
-    } else if (typeof window.confirm === 'function') {
-      confirmed = window.confirm('应用这次结构修复？');
-    }
-  } catch (error) {
-    console.error('[Response Linter] 显示修复确认失败:', error);
-    confirmed = false;
-  }
-
-  try {
-    const result = await backendController?.confirmFix(messageId, confirmed);
-    if (confirmed && result?.success) showSettingsToast('success', '修复已应用');
+    const result = await popup.result;
+    if (result.invalidated) { await backendController?.confirmFix(messageId, false, detail.token); return; }
+    confirmed = result.confirmed;
+    const applied = await backendController?.confirmFix(messageId, confirmed, detail.token);
+    if (confirmed && applied?.success) showSettingsToast('success', '修复已应用');
     else if (!confirmed) showSettingsToast('info', '修复已取消');
-    else showSettingsToast('error', result?.reason || result?.metadata?.reason || '确认修复失败');
+    else showSettingsToast('error', applied?.reason || applied?.metadata?.reason || '确认修复失败');
   } catch (error) {
     console.error('[Response Linter] 确认修复失败:', error);
     showSettingsToast('error', '确认修复失败');
   } finally {
-    confirmationInFlight = false;
+    if (activeConfirmation === entry) activeConfirmation = null;
     try { UIState?.updateStatistics?.(); UIState?.updateStatusIndicator?.(); } catch {}
   }
 }
 
 function setupRepairEventHandlers() {
+  document.addEventListener('responseLinter.previewInvalidated', event => {
+    if (activeConfirmation?.token === event.detail?.token) activeConfirmation.popup.close(false, true);
+  });
   document.addEventListener('responseLinter.confirmationRequired', event => {
     void showStructureConfirmation(event.detail);
   });
@@ -1005,9 +998,9 @@ jQuery(async () => {
     }, 8000);
 
     window.ResponseLinter = window.ResponseLinter || {};
-    window.ResponseLinter.version = '1.4.12';
+    window.ResponseLinter.version = '1.4.13';
     window.ResponseLinter.backendController = backendController;
-    console.info('[Response Linter] 1.4.12 初始化完成');
+    console.info('[Response Linter] 1.4.13 初始化完成');
   } catch (error) {
     console.error('[Response Linter] 扩展初始化失败:', error);
     showSettingsToast('error', '响应检查器扩展加载失败');

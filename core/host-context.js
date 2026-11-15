@@ -72,7 +72,30 @@ export function chatIdentity(ctx) {
 }
 
 let generationEpoch = 0;
-export function noteGenerationStarted() { generationEpoch++; }
+let activeGeneration = null;
+let navigationBlocked = null;
+export function currentGenerationEpoch() { return generationEpoch; }
+export function noteGenerationStarted() {
+  generationEpoch++;
+  const ctx = getFreshContext();
+  activeGeneration = { chat: ctx?.chat, chatId: chatIdentity(ctx) };
+}
+export function noteGenerationEnded() { activeGeneration = null; }
+export function noteNavigation() {
+  generationEpoch++;
+  activeGeneration = null;
+  const ctx = getFreshContext();
+  navigationBlocked = { chat: ctx?.chat, chatId: chatIdentity(ctx) };
+}
+export function noteFinalMessage() { navigationBlocked = null; }
+export function hasValidSwipe(message) {
+  return !Array.isArray(message?.swipes) || (Number.isInteger(message.swipe_id)
+    && message.swipe_id >= 0 && message.swipe_id < message.swipes.length);
+}
+export function isAutoRepairReady(ctx, message) {
+  return hasValidSwipe(message) && !isStreamingContext(ctx) &&
+    !(navigationBlocked?.chat === ctx?.chat && navigationBlocked?.chatId === chatIdentity(ctx));
+}
 export function captureAutoTarget(ctx, message) {
   return { chat: ctx?.chat, chatId: chatIdentity(ctx), message,
     length: ctx?.chat?.length, tail: ctx?.chat?.at(-1), epoch: generationEpoch };
@@ -88,6 +111,7 @@ export function isCurrentAutoTarget(target, ctx = getFreshContext()) {
  * 只要处理器仍存在且未标记完成，就视为流未结束，不写入消息。
  */
 export function isStreamingContext(ctx) {
+  if (activeGeneration?.chat && activeGeneration.chat === ctx?.chat && activeGeneration.chatId === chatIdentity(ctx)) return true;
   const processor = ctx?.streamingProcessor;
   if (!processor) return false;
   if (processor.isFinished === true || processor.isStopped === true) return false;

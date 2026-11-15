@@ -2,7 +2,10 @@
 // Coordinates only the three structure-repair features and the shared repair
 // coordinator. Generic validation rules are never initialized, validated or
 // executed here, even if legacy settings/imports still contain them.
-import { getFreshContext, findMessage, messageContent, messageSwipeId, captureAutoTarget, isCurrentAutoTarget, isStreamingContext } from './host-context.js';
+import { getFreshContext, findMessage, messageContent, messageSwipeId, captureAutoTarget, isCurrentAutoTarget, isStreamingContext, isAutoRepairReady } from './host-context.js';
+import { ensureRepairLifecycle } from './repair-lifecycle.js';
+import { recordDiagnostic } from './diagnostics.js';
+import { messageModifier } from './message-modifier.js';
 import { buildRepairPlan, hasEnabledFeature } from './repair-service.js';
 import { fixCoordinator } from './fix-coordinator.js';
 import { messageHandler } from './message-handler.js';
@@ -70,6 +73,7 @@ export class BackendController {
 
   updateSettings(settings) {
     try {
+      messageModifier.invalidatePreviews('settings_changed');
       this.settings = settings || {};
       fixCoordinator.updateSettings({
         enabled: this.settings.enabled,
@@ -83,6 +87,7 @@ export class BackendController {
   }
 
   _syncListening() {
+    ensureRepairLifecycle();
     const settings = this.settings || {};
     // Automatic repair only needs event listening when at least one structure
     // feature is enabled. Manual repair reads the latest message directly.
@@ -165,7 +170,7 @@ export class BackendController {
       if (!hasEnabledFeature(settings)) return;
       const ctx = __getCtx();
       const found = findMessage(ctx, messageData.messageId);
-      if (!found.message || found.message.is_user || found.message.is_system || isStreamingContext(ctx)) return;
+      if (!found.message || found.message.is_user || found.message.is_system || !isAutoRepairReady(ctx, found.message)) return;
       const autoTarget = captureAutoTarget(ctx, found.message);
       if (!isCurrentAutoTarget(autoTarget, ctx)) return;
       // Queue a target, not a text transform computed before another writer.
@@ -186,6 +191,7 @@ export class BackendController {
     const ticket = { key, chat: plan.autoTarget?.chat, message: plan.message, epoch: plan.autoTarget?.epoch };
     if (prior && prior.key === key && prior.chat === ticket.chat && prior.message === ticket.message && prior.epoch === ticket.epoch) return;
     this._autoPlanKeys.set(String(plan.messageId), ticket);
+    recordDiagnostic('repair.queued', { swipeId: plan.swipeId, rawLength: plan.content.length });
     const pending = fixCoordinator.queueRepairPlan(plan, { priority: 60 });
     Promise.resolve(pending).then(result => {
       if (!result?.success && /过期|取消|已变化|已切换|未完成/.test(result?.reason || result?.metadata?.reason || '')) {
@@ -256,9 +262,11 @@ export class BackendController {
     }
   }
 
-  async confirmFix(messageId, confirmed) {
+  isPreviewCurrent(token) { return messageModifier.isPreviewCurrent(token); }
+
+  async confirmFix(messageId, confirmed, token = null) {
     try {
-      return await fixCoordinator.confirmFix(messageId, confirmed);
+      return await fixCoordinator.confirmFix(messageId, confirmed, token);
     } catch (error) {
       console.error('确认修复失败:', error);
       return { success: false, reason: '确认过程出错', error: error.message };
