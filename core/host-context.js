@@ -47,6 +47,42 @@ export function messageSwipeId(message) {
   return Number.isInteger(message?.swipe_id) ? message.swipe_id : null;
 }
 
+// Exact text-field snapshots. Memory/plugin metadata is deliberately excluded.
+export function snapshotMessage(message) {
+  const hasSwipe = Array.isArray(message?.swipes) && Number.isInteger(message.swipe_id)
+    && message.swipe_id >= 0 && message.swipe_id < message.swipes.length;
+  return {
+    mes: message?.mes, hasExtra: !!message?.extra,
+    hasDisplay: Object.prototype.hasOwnProperty.call(message?.extra || {}, 'display_text'),
+    display: message?.extra?.display_text, swipeId: message?.swipe_id,
+    swipes: message?.swipes, hasSwipe,
+    swipe: hasSwipe ? message.swipes[message.swipe_id] : undefined,
+  };
+}
+
+export function sameMessageState(message, state) {
+  if (!message || !state) return false;
+  const current = snapshotMessage(message);
+  return ['mes', 'hasDisplay', 'display', 'swipeId', 'swipes', 'hasSwipe', 'swipe']
+    .every(key => Object.is(current[key], state[key]));
+}
+
+export function chatIdentity(ctx) {
+  try { return ctx?.getCurrentChatId?.() ?? ctx?.chatId ?? null; } catch { return null; }
+}
+
+let generationEpoch = 0;
+export function noteGenerationStarted() { generationEpoch++; }
+export function captureAutoTarget(ctx, message) {
+  return { chat: ctx?.chat, chatId: chatIdentity(ctx), message,
+    length: ctx?.chat?.length, tail: ctx?.chat?.at(-1), epoch: generationEpoch };
+}
+export function isCurrentAutoTarget(target, ctx = getFreshContext()) {
+  return !!target && target.chat === ctx?.chat && target.chatId === chatIdentity(ctx)
+    && target.epoch === generationEpoch && target.length === ctx?.chat?.length
+    && target.tail === ctx?.chat?.at(-1) && target.message === target.tail;
+}
+
 /**
  * 当前是否正在流式生成。宿主 getContext() 暴露 streamingProcessor；
  * 只要处理器仍存在且未标记完成，就视为流未结束，不写入消息。

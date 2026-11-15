@@ -3,7 +3,8 @@
 
 // 统一通过 getContext() 与宿主交互，避免直接导入扩展内部文件。
 // 每次写入/确认前重新取上下文，优先实际宿主 window.SillyTavern.getContext。
-import { getFreshContext, isStreamingContext } from './host-context.js';
+import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, captureAutoTarget, isCurrentAutoTarget } from './host-context.js';
+import { withMessageWriteLease, ownsWriteLease } from './message-write-lease.js';
 const __getCtx = () => getFreshContext();
 
 /**
@@ -87,7 +88,8 @@ export class MessageModifier {
       }
 
       const originalContent = currentMessage.extra?.display_text ?? currentMessage.mes ?? '';
-      if (expectedContent !== null && originalContent.trim() !== expectedContent.trim()) {
+      if ((expectedContent !== null && originalContent !== expectedContent) ||
+          (options.expectedState && !sameMessageState(currentMessage, options.expectedState))) {
         return { success: false, metadata: { reason: '消息已发生变化，请重新检查后修复' } };
       }
 
@@ -104,11 +106,11 @@ export class MessageModifier {
 
       // 如果需要确认，先存储待确认的修改
       if (requireConfirmation) {
-        return await this._handleConfirmationRequired(messageId, originalContent, newContent, strategy, options.warnings || []);
+        return await this._handleConfirmationRequired(messageId, originalContent, newContent, strategy, options.warnings || [], options);
       }
 
       // 直接执行修改
-      return await this._executeModification(messageId, originalContent, newContent, strategy);
+      return await this._executeModification(messageId, originalContent, newContent, strategy, options);
     } catch (error) {
       console.error('修改消息失败:', error);
       return {
@@ -130,26 +132,19 @@ export class MessageModifier {
    * @param {string} strategy - 修改策略
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async _executeModification(messageId, originalContent, newContent, strategy) {
+  async _executeModification(messageId, originalContent, newContent, strategy, options = {}) {
     const message = this._getMessage(messageId);
     if (!message) return { success: false, metadata: { reason: '找不到指定的消息' } };
     const before = this._snapshot(message);
     const after = { ...before, mes: newContent, hasDisplay: true, display: newContent,
       hasExtra: true, swipe: before.hasSwipe ? newContent : before.swipe };
-    const result = await this._writeState(messageId, message, after);
+    const result = await this._writeState(messageId, message, after, options.expectedState || before, options);
     if (result.success) this._recordModification(messageId, originalContent, newContent, strategy, message, before, after);
     return { ...result, messageId, originalContent, newContent };
   }
 
   _snapshot(message) {
-    const hasSwipe = Array.isArray(message.swipes) && Number.isInteger(message.swipe_id) &&
-      message.swipe_id >= 0 && message.swipe_id < message.swipes.length;
-    return {
-      mes: message.mes, hasExtra: !!message.extra,
-      hasDisplay: Object.prototype.hasOwnProperty.call(message.extra || {}, 'display_text'),
-      display: message.extra?.display_text, swipeId: message.swipe_id,
-      hasSwipe, swipe: hasSwipe ? message.swipes[message.swipe_id] : undefined,
-    };
+    return snapshotMessage(message);
   }
 
   _restore(message, state) {
@@ -164,34 +159,116 @@ export class MessageModifier {
     if (state.hasSwipe) message.swipes[state.swipeId] = state.swipe;
   }
 
-  async _writeState(messageId, message, state) {
+  // Roll back only fields which still contain our write. Never restore a whole
+  // extra/swipe_info/metadata object over another plugin's memory updates.
+  _rollbackOwned(message, before, written) {
+    if (message.swipe_id === written.swipeId) {
+      if (Object.is(message.mes, written.mes)) message.mes = before.mes;
+      const hasDisplay = Object.prototype.hasOwnProperty.call(message.extra || {}, 'display_text');
+      if (hasDisplay === written.hasDisplay && Object.is(message.extra?.display_text, written.display)) {
+        if (before.hasDisplay) {
+          message.extra ||= {};
+          message.extra.display_text = before.display;
+        } else if (message.extra) {
+          delete message.extra.display_text;
+          if (!before.hasExtra && Object.keys(message.extra).length === 0) delete message.extra;
+        }
+      }
+    }
+    if (written.hasSwipe && message.swipes === written.swipes &&
+        Object.is(message.swipes[written.swipeId], written.swipe)) {
+      message.swipes[written.swipeId] = before.swipe;
+    }
+  }
+
+  async _writeState(messageId, message, state, expectedState = this._snapshot(message), options = {}) {
+    const origin = __getCtx();
+    const chat = origin?.chat;
+    const id = chatIdentity(origin);
+    const write = lease => {
+      const fresh = __getCtx();
+      if (fresh?.chat !== chat || chatIdentity(fresh) !== id || this._getMessage(messageId) !== message) {
+        return { success: false, metadata: { reason: '聊天或消息已切换，本次修复已取消' } };
+      }
+      return this._writeStateLocked(messageId, message, state, expectedState, { ...options, lease });
+    };
+    if (options.lease) {
+      if (!ownsWriteLease(options.lease, chat)) return { success: false, metadata: { reason: '写入租约已过期' } };
+      return write(options.lease);
+    }
+    return withMessageWriteLease(chat, write);
+  }
+
+  async _writeStateLocked(messageId, message, state, expectedState, options) {
     if (this.activeWrites.has(messageId)) return { success: false, metadata: { reason: '此消息正在保存，请稍后重试' } };
     if (isStreamingContext(__getCtx())) {
       return { success: false, metadata: { reason: '当前回复仍在流式生成，已跳过写入，请等待生成完成' } };
     }
     this.activeWrites.add(messageId);
     const before = this._snapshot(message);
-    document.dispatchEvent(new CustomEvent('responseLinter.messageWriteStarted', { detail: { messageId } }));
+    const origin = __getCtx();
+    const originChat = origin?.chat;
+    const originId = chatIdentity(origin);
+    // Once a later user/generation/chat/swipe boundary is visible, memory may
+    // already have observed our text. Never roll that stable source backwards.
+    const writeBoundary = captureAutoTarget(origin, originChat?.at(-1));
+    const sameTarget = () => {
+      const ctx = __getCtx();
+      return ctx?.chat === originChat && chatIdentity(ctx) === originId &&
+        this._getMessage(messageId) === message && message.swipe_id === state.swipeId;
+    };
+    const assertCurrent = expected => {
+      if (!sameTarget() || !sameMessageState(message, expected) || isStreamingContext(__getCtx()) ||
+          !isCurrentAutoTarget(writeBoundary) ||
+          !ownsWriteLease(options.lease, originChat) ||
+          (options.autoTarget && !isCurrentAutoTarget(options.autoTarget))) {
+        const error = new Error('消息、候选回复或生成状态已变化，本次修复未完成');
+        error.conflict = true;
+        throw error;
+      }
+    };
+    let wrote = false;
+    let success = false;
+    let saveStarted = false;
     try {
+      assertCurrent(expectedState);
+      document.dispatchEvent(new CustomEvent('responseLinter.messageWriteStarted', {
+        detail: { messageId, message, chat: originChat, chatId: originId },
+      }));
+      // Event listeners run synchronously and may themselves change the target.
+      assertCurrent(expectedState);
       this._restore(message, state);
+      wrote = true;
       const rendered = await this._updateMessageBlock(messageId, message);
       if (!rendered.success) throw new Error(rendered.error || '消息显示更新失败');
+      assertCurrent(state);
       const ctx = __getCtx();
-      if (this._getMessage(messageId) !== message || message.swipe_id !== state.swipeId) {
-        throw new Error('聊天或候选回复已切换');
-      }
       const save = ctx?.saveChat || ctx?.saveChatConditional;
       if (typeof save !== 'function') throw new Error('聊天保存接口不可用');
+      saveStarted = true;
       await save.call(ctx);
+      assertCurrent(state);
+      success = true;
       return { success: true };
     } catch (error) {
-      this._restore(message, before);
-      await this._updateMessageBlock(messageId, message);
-      return { success: false, metadata: { reason: '消息修改或保存失败', error: error.message } };
+      const canRollback = sameTarget() && isCurrentAutoTarget(writeBoundary) && !isStreamingContext(__getCtx());
+      if (wrote && canRollback) {
+        this._rollbackOwned(message, before, state);
+        // Do not render an old chat/swipe into the currently visible one.
+        if (sameTarget()) await this._updateMessageBlock(messageId, message);
+      }
+      return { success: false, metadata: {
+        reason: wrote && !canRollback ? '正文已可见且已进入新轮次或切换消息，保留正文；保存状态未确认，本次修复未完成'
+          : error.conflict ? error.message : '消息修改或保存失败',
+        error: error.message, conflict: error.conflict === true,
+        rollbackSkipped: wrote && !canRollback, saveStarted,
+      } };
     } finally {
       this.activeWrites.delete(messageId);
       document.dispatchEvent(new CustomEvent('responseLinter.messageWriteFinished', {
-        detail: { messageId, content: message.extra?.display_text ?? message.mes ?? '' },
+        detail: { messageId, message, chat: originChat, chatId: originId, success,
+          content: message.extra?.display_text ?? message.mes ?? '',
+          committedState: success ? state : null },
       }));
     }
   }
@@ -237,12 +314,17 @@ export class MessageModifier {
    * @param {string} strategy - 修改策略
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async _handleConfirmationRequired(messageId, originalContent, newContent, strategy, warnings = []) {
+  async _handleConfirmationRequired(messageId, originalContent, newContent, strategy, warnings = [], options = {}) {
     // 一次现取消息并同时记录消息/候选回复身份，确认时必须仍指向同一对象与同一 swipe。
     const message = this._getMessage(messageId);
+    const ctx = __getCtx();
     const swipeId = Number.isInteger(message?.swipe_id) ? message.swipe_id : null;
     this.pendingModifications.set(messageId, {
       message,
+      chat: ctx?.chat,
+      chatId: chatIdentity(ctx),
+      expectedState: this._snapshot(message),
+      autoTarget: options.autoTarget,
       swipeId,
       originalContent,
       newContent,
@@ -286,10 +368,13 @@ export class MessageModifier {
     this.pendingModifications.delete(messageId);
 
     if (confirmed) {
+      const ctx = __getCtx();
       const current = this._getMessage(messageId);
       const currentSwipeId = Number.isInteger(current?.swipe_id) ? current.swipe_id : null;
-      if (!this.isEnabled || current !== pendingModification.message || currentSwipeId !== pendingModification.swipeId ||
-          (current?.extra?.display_text ?? current?.mes ?? '') !== pendingModification.originalContent) {
+      if (!this.isEnabled || ctx?.chat !== pendingModification.chat || chatIdentity(ctx) !== pendingModification.chatId ||
+          current !== pendingModification.message || currentSwipeId !== pendingModification.swipeId ||
+          !sameMessageState(current, pendingModification.expectedState) ||
+          (pendingModification.autoTarget && !isCurrentAutoTarget(pendingModification.autoTarget))) {
         return { success: false, metadata: { reason: '消息或启用状态已变化，请重新修复' } };
       }
       // 执行修改
@@ -298,6 +383,7 @@ export class MessageModifier {
         pendingModification.originalContent,
         pendingModification.newContent,
         pendingModification.strategy,
+        { expectedState: pendingModification.expectedState, autoTarget: pendingModification.autoTarget },
       );
       return { ...result, warnings: pendingModification.warnings || [] };
     } else {
@@ -327,7 +413,7 @@ export class MessageModifier {
     const message = this._getMessage(messageId);
     const latest = history[history.length - 1];
     const current = this._snapshot(message);
-    if (current.mes !== latest.after.mes || current.display !== latest.after.display || current.swipe !== latest.after.swipe) {
+    if (!sameMessageState(message, latest.after)) {
       return { success: false, metadata: { reason: '消息已被编辑，请勿覆盖后续修改' } };
     }
     const targetIndex = Math.max(0, history.length - steps);
@@ -405,6 +491,7 @@ export class MessageModifier {
       messageId,
       originalContent,
       message, before, after,
+      chat: __getCtx()?.chat, chatId: chatIdentity(__getCtx()),
       modifiedContent,
       strategy,
       timestamp: new Date(),
@@ -467,7 +554,8 @@ export class MessageModifier {
     messageId = String(messageId);
     const history = this.modificationHistory.get(messageId) || [];
     const current = this._getMessage(messageId);
-    if (history.length && (history[0].message !== current || history[0].before.swipeId !== current?.swipe_id)) {
+    if (history.length && (history[0].chat !== __getCtx()?.chat || history[0].chatId !== chatIdentity(__getCtx()) ||
+        history[0].message !== current || history[0].before.swipeId !== current?.swipe_id)) {
       this.modificationHistory.delete(messageId);
       return [];
     }

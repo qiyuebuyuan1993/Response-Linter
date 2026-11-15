@@ -10,6 +10,9 @@ import {
   isStreamingContext,
   messageContent,
   messageSwipeId,
+  snapshotMessage,
+  captureAutoTarget,
+  isCurrentAutoTarget,
 } from './host-context.js';
 import { sanitizeLeakedReasoning } from './reasoning-sanitizer.js';
 import {
@@ -129,6 +132,7 @@ export function buildRepairPlan({
   messageId,
   settings = {},
   ctx = null,
+  automatic = false,
 } = {}) {
   const context = ctx || getFreshContext();
   if (!context) {
@@ -165,6 +169,11 @@ export function buildRepairPlan({
     return { success: false, reason: '消息内容不是文本。', warnings: [] };
   }
   const swipeId = messageSwipeId(message);
+  const expectedState = snapshotMessage(message);
+  const autoTarget = automatic ? captureAutoTarget(context, message) : null;
+  if (automatic && !isCurrentAutoTarget(autoTarget, context)) {
+    return { success: false, suppressed: true, reason: '自动修复目标已成为历史消息', warnings: [] };
+  }
   const feature = transformContent(content, settings, context);
   const warnings = [...feature.warnings];
 
@@ -197,6 +206,8 @@ export function buildRepairPlan({
     strategies: feature.strategies,
     warnings: [...new Set(warnings)],
     message,
+    expectedState,
+    autoTarget,
     featureChanged: true,
     calendarResult: feature.calendarResult,
     featureDetails: feature.details,

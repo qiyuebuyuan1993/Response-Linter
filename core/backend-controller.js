@@ -2,7 +2,7 @@
 // Coordinates only the three structure-repair features and the shared repair
 // coordinator. Generic validation rules are never initialized, validated or
 // executed here, even if legacy settings/imports still contain them.
-import { getFreshContext } from './host-context.js';
+import { getFreshContext, findMessage, messageContent, messageSwipeId, captureAutoTarget, isCurrentAutoTarget, isStreamingContext } from './host-context.js';
 import { buildRepairPlan, hasEnabledFeature } from './repair-service.js';
 import { fixCoordinator } from './fix-coordinator.js';
 import { messageHandler } from './message-handler.js';
@@ -163,16 +163,17 @@ export class BackendController {
       const settings = this._getCurrentSettings();
       if (settings.enabled !== true || settings.autoFix !== true) return;
       if (!hasEnabledFeature(settings)) return;
-      const plan = buildRepairPlan({
-        messageId: messageData.messageId,
-        settings,
-        ctx: __getCtx(),
-      });
-      if (plan.success) {
-        this._enqueueAutoPlan(plan);
-      } else if (!plan.suppressed && plan.warnings?.length) {
-        this._dispatchFixWarning(messageData.messageId, plan.warnings, plan.content);
-      }
+      const ctx = __getCtx();
+      const found = findMessage(ctx, messageData.messageId);
+      if (!found.message || found.message.is_user || found.message.is_system || isStreamingContext(ctx)) return;
+      const autoTarget = captureAutoTarget(ctx, found.message);
+      if (!isCurrentAutoTarget(autoTarget, ctx)) return;
+      // Queue a target, not a text transform computed before another writer.
+      // Even a currently clean message may change while waiting for the lock.
+      this._enqueueAutoPlan({ success: true, messageId: found.resolvedId,
+        message: found.message, swipeId: messageSwipeId(found.message),
+        content: messageContent(found.message), fixedContent: '', autoTarget, settings,
+        readSettings: () => this._getCurrentSettings() });
     } catch (error) {
       console.error('[Response Linter] 处理自动修复失败:', error, messageData);
     }
@@ -181,11 +182,17 @@ export class BackendController {
   _enqueueAutoPlan(plan) {
     if (!plan?.success) return;
     const key = `${plan.messageId}|${plan.swipeId}|${plan.content}|${plan.fixedContent}`;
-    if (this._autoPlanKeys.get(String(plan.messageId)) === key) return;
-    this._autoPlanKeys.set(String(plan.messageId), key);
+    const prior = this._autoPlanKeys.get(String(plan.messageId));
+    const ticket = { key, chat: plan.autoTarget?.chat, message: plan.message, epoch: plan.autoTarget?.epoch };
+    if (prior && prior.key === key && prior.chat === ticket.chat && prior.message === ticket.message && prior.epoch === ticket.epoch) return;
+    this._autoPlanKeys.set(String(plan.messageId), ticket);
     const pending = fixCoordinator.queueRepairPlan(plan, { priority: 60 });
-    Promise.resolve(pending).finally(() => {
-      if (this._autoPlanKeys.get(String(plan.messageId)) === key) {
+    Promise.resolve(pending).then(result => {
+      if (!result?.success && /过期|取消|已变化|已切换|未完成/.test(result?.reason || result?.metadata?.reason || '')) {
+        this._dispatchFixWarning(plan.messageId, [result.reason || result.metadata.reason], plan.content);
+      } else if (result?.warnings?.length) this._dispatchFixWarning(plan.messageId, result.warnings, plan.content);
+    }).finally(() => {
+      if (this._autoPlanKeys.get(String(plan.messageId)) === ticket) {
         this._autoPlanKeys.delete(String(plan.messageId));
       }
     });
