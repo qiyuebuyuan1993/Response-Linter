@@ -3,9 +3,11 @@
 
 // 统一通过 getContext() 与宿主交互，避免直接导入扩展内部文件。
 // 每次写入/确认前重新取上下文，优先实际宿主 window.SillyTavern.getContext。
-import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, captureAutoTarget, isCurrentAutoTarget } from './host-context.js';
+import { getFreshContext, isStreamingContext, snapshotMessage, sameMessageState, chatIdentity, captureAutoTarget, isCurrentAutoTarget, hasValidSwipe } from './host-context.js';
+import { recordDiagnostic } from './diagnostics.js';
 import { withMessageWriteLease, ownsWriteLease } from './message-write-lease.js';
 const __getCtx = () => getFreshContext();
+let previewSequence = 0;
 
 /**
  * 修改历史记录数据结构
@@ -46,6 +48,7 @@ export class MessageModifier {
    */
   setEnabled(enabled) {
     this.isEnabled = enabled;
+    if (!enabled) this.invalidatePreviews('disabled');
     console.log(`消息修改服务${enabled ? '已启用' : '已禁用'}`);
   }
 
@@ -69,7 +72,8 @@ export class MessageModifier {
       };
     }
 
-    // Never replace a plan while its preview is still awaiting a decision.
+    this.invalidateStalePreviews('message_changed');
+    // Never replace a valid plan while its preview is awaiting a decision.
     if (this.pendingModifications.size) {
       return { success: false, messageId, metadata: { reason: '请先确认或取消当前修复预览' } };
     }
@@ -218,7 +222,7 @@ export class MessageModifier {
         this._getMessage(messageId) === message && message.swipe_id === state.swipeId;
     };
     const assertCurrent = expected => {
-      if (!sameTarget() || !sameMessageState(message, expected) || isStreamingContext(__getCtx()) ||
+      if (!sameTarget() || !sameMessageState(message, expected) || isStreamingContext(__getCtx()) || !hasValidSwipe(message) ||
           !isCurrentAutoTarget(writeBoundary) ||
           !ownsWriteLease(options.lease, originChat) ||
           (options.autoTarget && !isCurrentAutoTarget(options.autoTarget))) {
@@ -230,6 +234,7 @@ export class MessageModifier {
     let wrote = false;
     let success = false;
     let saveStarted = false;
+    recordDiagnostic('write.started', { swipeId: state.swipeId, owner: 'response-linter' });
     try {
       assertCurrent(expectedState);
       document.dispatchEvent(new CustomEvent('responseLinter.messageWriteStarted', {
@@ -264,6 +269,7 @@ export class MessageModifier {
         rollbackSkipped: wrote && !canRollback, saveStarted,
       } };
     } finally {
+      recordDiagnostic('write.finished', { swipeId: state.swipeId, success, owner: 'response-linter' });
       this.activeWrites.delete(messageId);
       document.dispatchEvent(new CustomEvent('responseLinter.messageWriteFinished', {
         detail: { messageId, message, chat: originChat, chatId: originId, success,
@@ -318,9 +324,15 @@ export class MessageModifier {
     // 一次现取消息并同时记录消息/候选回复身份，确认时必须仍指向同一对象与同一 swipe。
     const message = this._getMessage(messageId);
     const ctx = __getCtx();
+    if (isStreamingContext(ctx) || !hasValidSwipe(message)) {
+      return { success: false, metadata: { reason: '回复尚未完成，已跳过修复预览' } };
+    }
+    const token = ++previewSequence;
     const swipeId = Number.isInteger(message?.swipe_id) ? message.swipe_id : null;
     this.pendingModifications.set(messageId, {
       message,
+      token,
+      boundary: captureAutoTarget(ctx, ctx?.chat?.at(-1)),
       chat: ctx?.chat,
       chatId: chatIdentity(ctx),
       expectedState: this._snapshot(message),
@@ -334,7 +346,8 @@ export class MessageModifier {
     });
 
     // 触发确认事件
-    this._dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings);
+    recordDiagnostic('preview.created', { swipeId, pendingCount: this.pendingModifications.size });
+    this._dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings, token);
 
     return {
       success: false,
@@ -345,15 +358,42 @@ export class MessageModifier {
     };
   }
 
+  isPreviewCurrent(token) {
+    const pending = [...this.pendingModifications.values()].find(item => item.token === token);
+    if (!pending || !this.isEnabled) return false;
+    const ctx = __getCtx();
+    return ctx?.chat === pending.chat && chatIdentity(ctx) === pending.chatId &&
+      ctx.chat.includes(pending.message) && !isStreamingContext(ctx) && hasValidSwipe(pending.message) &&
+      sameMessageState(pending.message, pending.expectedState) && isCurrentAutoTarget(pending.boundary) &&
+      (!pending.autoTarget || isCurrentAutoTarget(pending.autoTarget));
+  }
+
+  invalidatePreviews(reason, staleOnly = false) {
+    for (const [messageId, pending] of this.pendingModifications) {
+      if (staleOnly && this.isPreviewCurrent(pending.token)) continue;
+      this.pendingModifications.delete(messageId);
+      recordDiagnostic('preview.invalidated', { reason, swipeId: pending.swipeId });
+      document.dispatchEvent(new CustomEvent('responseLinter.previewInvalidated', {
+        detail: { messageId, token: pending.token, reason },
+      }));
+    }
+  }
+
+  invalidateStalePreviews(reason) { this.invalidatePreviews(reason, true); }
+
   /**
    * 确认待处理的修改
    * @param {string} messageId - 消息ID
    * @param {boolean} confirmed - 是否确认修改
    * @returns {Promise<ModificationResult>} 修改结果
    */
-  async confirmModification(messageId, confirmed) {
+  async confirmModification(messageId, confirmed, token = null) {
     messageId = String(messageId);
     const pendingModification = this.pendingModifications.get(messageId);
+    if (pendingModification && token !== null && token !== pendingModification.token) {
+      recordDiagnostic('preview.rejected', { reason: 'token_mismatch' });
+      return { success: false, metadata: { reason: '预览已过期，请使用当前预览' } };
+    }
     if (!pendingModification) {
       return {
         success: false,
@@ -364,6 +404,7 @@ export class MessageModifier {
       };
     }
 
+    const isCurrent = this.isPreviewCurrent(pendingModification.token);
     // 清理待确认记录
     this.pendingModifications.delete(messageId);
 
@@ -371,13 +412,14 @@ export class MessageModifier {
       const ctx = __getCtx();
       const current = this._getMessage(messageId);
       const currentSwipeId = Number.isInteger(current?.swipe_id) ? current.swipe_id : null;
-      if (!this.isEnabled || ctx?.chat !== pendingModification.chat || chatIdentity(ctx) !== pendingModification.chatId ||
+      if (!isCurrent || !this.isEnabled || ctx?.chat !== pendingModification.chat || chatIdentity(ctx) !== pendingModification.chatId ||
           current !== pendingModification.message || currentSwipeId !== pendingModification.swipeId ||
           !sameMessageState(current, pendingModification.expectedState) ||
           (pendingModification.autoTarget && !isCurrentAutoTarget(pendingModification.autoTarget))) {
         return { success: false, metadata: { reason: '消息或启用状态已变化，请重新修复' } };
       }
       // 执行修改
+      recordDiagnostic('preview.confirmed', { swipeId: currentSwipeId });
       const result = await this._executeModification(
         messageId,
         pendingModification.originalContent,
@@ -526,11 +568,12 @@ export class MessageModifier {
    * @param {string} newContent - 新内容
    * @param {string} strategy - 修改策略
    */
-  _dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings = []) {
+  _dispatchConfirmationEvent(messageId, originalContent, newContent, strategy, warnings = [], token) {
     try {
       const event = new CustomEvent('responseLinter.modificationConfirmationRequired', {
         detail: {
           messageId,
+          token,
           originalContent,
           newContent,
           strategy,
