@@ -37,14 +37,30 @@ export function ensureRepairLifecycle() {
     noteNavigation(); generation = null; invalidate('chat_changed');
     recordDiagnostic('host.chat_changed');
   });
-  for (const name of ['MESSAGE_SENT', 'MESSAGE_DELETED', 'MESSAGE_SWIPE_DELETED']) {
+  on('MESSAGE_SENT', index => {
+    const entry = generation;
+    const fresh = getFreshContext();
+    const initial = entry?.initialUserPending;
+    if (entry) entry.initialUserPending = false;
+    // TT announces normal generation before appending its initiating user
+    // message. Consume this exception once; later user messages cancel work.
+    if (initial && entry.chat === fresh?.chat && entry.chatId === chatIdentity(fresh) &&
+        Number(index) === entry.length && fresh.chat.length === entry.length + 1 &&
+        (entry.length === 0 || (fresh.chat[entry.length - 1] === entry.message &&
+          sameMessageState(entry.message, entry.state))) &&
+        fresh.chat[entry.length]?.is_user === true) return;
+    noteNavigation(); generation = null; invalidate('message_boundary');
+  });
+  for (const name of ['MESSAGE_DELETED', 'MESSAGE_SWIPE_DELETED']) {
     on(name, () => { noteNavigation(); generation = null; invalidate('message_boundary'); });
   }
   on('GENERATION_STARTED', (type, options, dryRun) => {
     if (dryRun === true || type === 'quiet') return;
     const fresh = getFreshContext();
     const message = fresh?.chat?.at(-1);
-    generation = { chat: fresh?.chat, chatId: chatIdentity(fresh), message, state: snapshotMessage(message) };
+    generation = { chat: fresh?.chat, chatId: chatIdentity(fresh), message, state: snapshotMessage(message),
+      length: fresh?.chat?.length,
+      initialUserPending: [undefined, null, '', 'normal', 'generation'].includes(type) && options?.automatic_trigger !== true };
     noteGenerationStarted(); invalidate('generation_started');
     recordDiagnostic('host.generation_started');
     const entry = generation;

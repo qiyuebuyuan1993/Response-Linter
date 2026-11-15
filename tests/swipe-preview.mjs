@@ -137,3 +137,51 @@ test('old idle completion cannot unlock a newer generation', async () => {
   await until(() => !isStreamingContext(ctx));
   assert.equal(confirmations.length, 0);
 });
+
+for (const type of ['normal', undefined]) {
+  test(`TT ${type} STARTED-SENT-RECEIVED-ENDED repairs the new assistant only`, async () => {
+    ctx.eventSource.emit('GENERATION_STARTED', type, {}, false);
+    ctx.chat.push({ is_user: true, mes: 'initial user' });
+    ctx.eventSource.emit('MESSAGE_SENT', 1);
+    assert.equal(isStreamingContext(ctx), true);
+    const message = { is_user: false, mes: B, swipe_id: 0, swipes: [B] };
+    ctx.chat.push(message);
+    ctx.eventSource.emit('MESSAGE_RECEIVED', 2);
+    assert.equal(confirmations.length, 0);
+    ctx.eventSource.emit('GENERATION_ENDED');
+    await until(() => confirmations.length === 1);
+    const preview = confirmations[0];
+    assert.equal(preview.messageId, '2');
+    assert.equal((await controller.confirmFix('2', true, preview.token)).success, true);
+    assert.equal(message.mes, '<content>B</content>');
+    assert.equal(ctx.chat[0].mes, A);
+    assert.equal(saves, 1);
+  });
+}
+
+test('second user message cancels the generation and its late settled check', async () => {
+  ctx.eventSource.emit('GENERATION_STARTED', 'normal', {}, false);
+  ctx.chat.push({ is_user: true, mes: 'initial user' });
+  ctx.eventSource.emit('MESSAGE_SENT', 1);
+  assert.equal(isStreamingContext(ctx), true);
+  ctx.chat.push({ is_user: true, mes: 'next user' });
+  ctx.eventSource.emit('MESSAGE_SENT', 2);
+  assert.equal(isStreamingContext(ctx), false);
+  ctx.chat.push({ is_user: false, mes: B, swipe_id: 0, swipes: [B] });
+  ctx.eventSource.emit('GENERATION_ENDED');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(confirmations.length, 0);
+  assert.equal(saves, 0);
+});
+
+for (const variant of ['swipe', 'automatic', 'wrong-index', 'changed-tail', 'wrong-chat', 'dry-run']) {
+  test(`initial SENT exception rejects ${variant}`, () => {
+    ctx.eventSource.emit('GENERATION_STARTED', variant === 'swipe' ? 'swipe' : 'normal',
+      { automatic_trigger: variant === 'automatic' }, variant === 'dry-run');
+    if (variant === 'changed-tail') ctx.chat[0].mes = 'edited';
+    if (variant === 'wrong-chat') ctx.chatId = 'other';
+    ctx.chat.push({ is_user: true, mes: 'user' });
+    ctx.eventSource.emit('MESSAGE_SENT', variant === 'wrong-index' ? 0 : 1);
+    assert.equal(isStreamingContext(ctx), false);
+  });
+}

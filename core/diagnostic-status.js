@@ -5,7 +5,7 @@ import { messageHandler } from './message-handler.js';
 import { getDiagnostics } from './diagnostics.js';
 
 let lastChat, lastId, session = 0;
-export function diagnosticSnapshot(settings = {}, version = '1.4.13') {
+export function diagnosticSnapshot(settings = {}, version = '1.4.14') {
   const ctx = getFreshContext();
   if (ctx?.chat !== lastChat || chatIdentity(ctx) !== lastId) {
     lastChat = ctx?.chat; lastId = chatIdentity(ctx); session++;

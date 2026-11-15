@@ -1,14 +1,17 @@
-# 响应检查器 Response Linter 1.4.13
+# 响应检查器 Response Linter 1.4.14
 
 基于 [il1umi/Response-Linter](https://github.com/il1umi/Response-Linter) 的个人维护分支。
 
 1.4.10 是**精简版**：只保留回复结构修复。旧的通用验证规则、规则模板、规则编辑器、配置向导、旧诊断和统计界面已从生产路径移除。旧规则会一次性归档为不可执行的数据备份，不会被任何消息处理器、后端控制器或修复协调器执行。
 
-![版本](https://img.shields.io/badge/版本-1.4.13-blue.svg)
+![版本](https://img.shields.io/badge/版本-1.4.14-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue.svg)
 ![SillyTavern](https://img.shields.io/badge/SillyTavern-兼容-brightgreen.svg)
 
 ## 当前功能
+
+**1.4.14 普通生成事件顺序修复**：兼容 TT 先开始生成、再发送本轮用户消息的顺序。仅对同一聊天中紧接着追加的一条起始用户消息放行一次，保持生成保护直到回复完成；后续用户消息、目标变化或不匹配的事件仍取消旧任务。配合词汇映射使用时建议同步更新至 fix43。
+
 
 **1.4.13 翻页预览与诊断**：切换候选回复、聊天或开始生成时立即关闭旧预览；预览绑定当前聊天、消息、swipe 和唯一令牌，过期确认不会作用于新预览。单纯翻页不触发自动修复，已有候选回复仍可手动修复；新生成完成后才检查当前回复。词汇映射建议同步更新至 fix42，避免其延迟通知跨越 swipe 或生成边界。
 
@@ -117,7 +120,7 @@ node tests/features-1.4.8.mjs
 node tests/features-1.4.10.mjs
 ```
 
-当前共 **155** 项测试：
+当前共 **164** 项测试：
 
 | 文件 | 数量 | 重点 |
 | --- | ---: | --- |
@@ -130,9 +133,9 @@ node tests/features-1.4.10.mjs
 | `tests/features-1.4.11.mjs` | 7 | 关闭、焦点、主题和版本一致性 |
 | `tests/concurrent-auto.mjs` / `tests/concurrent-writes-harness.mjs` | 20 | 写入队列、回滚、迟到任务和稳定正文 |
 | `tests/diagnostics.mjs` | 11 | 字段白名单、容量、隐私与导出快照 |
-| `tests/swipe-preview.mjs` | 9 | 翻页令牌、生成空档、提前中止、旧事件取消 |
+| `tests/swipe-preview.mjs` | 18 | 翻页令牌、生成空档、提前中止、旧事件取消、起始用户消息与下一轮取消 |
 
-Codex 独立验收：上述 155 项测试已通过，另有 21 项迁移、结构与千千结兼容检查通过。`tests/harness.html` 是浏览器纯引擎夹具，不能替代真实酒馆验收。
+Codex 独立验收：上述 164 项测试已通过，另有 21 项迁移、结构与千千结兼容检查通过。`tests/harness.html` 是浏览器纯引擎夹具，不能替代真实酒馆验收。
 
 ## 历史更新（简）
 

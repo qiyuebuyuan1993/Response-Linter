@@ -334,10 +334,10 @@ test('CSS keeps themed checkbox dimensions and native wand alignment', () => {
   assert.doesNotMatch(checkbox, /(?:background|background-color|border-color|color)\s*:/);
 });
 
-test('manifest and runtime advertise the same 1.4.13 version', () => {
+test('manifest and runtime advertise the same 1.4.14 version', () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   const index = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  assert.equal(manifest.version, '1.4.13');
-  assert.match(index, /window\.ResponseLinter\.version = '1\.4\.13'/);
-  assert.match(index, /1\.4\.13 streamlined index loaded/);
+  assert.equal(manifest.version, '1.4.14');
+  assert.match(index, /window\.ResponseLinter\.version = '1\.4\.14'/);
+  assert.match(index, /1\.4\.14 streamlined index loaded/);
 });
