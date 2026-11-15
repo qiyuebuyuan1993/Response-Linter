@@ -164,6 +164,21 @@
 
   <hr class="sysHR" />
 
+  <details id="rl-diagnostics" class="rl-disclosure">
+    <summary>日志 / 状态诊断</summary>
+    <div class="rl-disclosure-body">
+      <p class="rl-help-text">保留本次打开酒馆期间最近 200 条流程记录，用于排查翻页、预览失效和插件写入顺序。只记录状态、匿名会话编号和文本长度，不记录正文、角色名、聊天 ID、密钥或配置内容。刷新酒馆后记录清空；遇到问题请先复制或下载诊断。</p>
+      <div class="rl-actions-row">
+        <button id="rl-diagnostics-refresh" type="button" class="menu_button secondary">刷新状态</button>
+        <button id="rl-diagnostics-copy" type="button" class="menu_button">复制诊断</button>
+        <button id="rl-diagnostics-download" type="button" class="menu_button secondary">下载诊断</button>
+        <button id="rl-diagnostics-clear" type="button" class="menu_button secondary">清空记录</button>
+      </div>
+      <p id="rl-diagnostics-status" role="status" aria-live="polite"></p>
+      <pre id="rl-diagnostics-output" style="max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text"></pre>
+    </div>
+  </details>
+
   <details class="rl-disclosure rl-advanced-disclosure">
     <summary>高级 / 帮助</summary>
     <div class="rl-disclosure-body">
