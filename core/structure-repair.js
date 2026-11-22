@@ -27,6 +27,7 @@ import {
   tagNameOf,
   validateMarkerTemplate,
 } from './structure-profiles.js';
+import { parseTagLayout, repairLayoutBlocks } from './tag-layout.js';
 
 const SDC_START_RE = /<!--\s*SDC-start\b([\s\S]*?)-->/gi;
 const SDC_END_RE = /<!--\s*SDC-end\b([\s\S]*?)-->/gi;
@@ -111,7 +112,10 @@ function findExternalBoundary(text, from, profile, ranges) {
   }
   if (!candidates.length) return null;
   candidates.sort((left, right) => left.index - right.index || right.marker.length - left.marker.length);
-  const marker = candidates[0];
+  return includeBoundarySeparator(text, candidates[0]);
+}
+
+function includeBoundarySeparator(text, marker) {
   const before = text.slice(0, marker.index);
   // A horizontal rule immediately before the first auxiliary marker belongs
   // outside the body; keep it byte-for-byte with the auxiliary region.
@@ -126,15 +130,23 @@ function findExternalBoundary(text, from, profile, ranges) {
   return { ...marker, hasSeparator: false };
 }
 
-function buildTokenBlock(narrative, endText, closeText, hasFollowing) {
-  let body = String(narrative ?? '').replace(/[ \t\r\n]+$/, '');
-  let block = body;
-  if (block && !block.endsWith('\n')) block += '\n';
-  block += endText;
-  block += '\n';
-  block += closeText;
-  if (hasFollowing) block += '\n';
-  return block;
+function rebuildBoundary(source, from, to, endText, closeText, markers) {
+  const removals = markers.filter(Boolean).map(match => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const cleanSlice = (start, end) => removeRanges(source.slice(start, end), removals
+    .filter(range => range.end > start && range.start < end)
+    .map(range => ({
+      start: Math.max(range.start, start) - start,
+      end: Math.min(range.end, end) - start,
+    })), { trimLines: true });
+  const after = cleanSlice(to, source.length);
+  const eol = source.includes('\r\n') ? '\r\n' : '\n';
+  const narrative = cleanSlice(from, to).replace(/[ \t\r\n]+$/, '');
+  const tokens = [narrative, endText, closeText].filter(Boolean).join(eol);
+  const separator = after && !/^\r?\n/.test(after) ? eol : '';
+  return source.slice(0, from) + tokens + separator + after;
 }
 
 function resolveCalendarOnDemand(options) {
@@ -257,7 +269,8 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
   if (!source) return base;
 
   const protectedRanges = findProtectedRanges(source);
-  const structuralRanges = mergeRanges([...protectedRanges, ...findHtmlCommentRanges(source)]);
+  const markerCommentRanges = findHtmlCommentRanges(source, protectedRanges);
+  const structuralRanges = mergeRanges([...protectedRanges, ...markerCommentRanges]);
   const bodyStarts = findDelimiterMatches(source, profile.body.open, structuralRanges, { open: true });
   const bodyCloses = findDelimiterMatches(source, profile.body.close, structuralRanges, { open: false });
 
@@ -277,11 +290,24 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
   const bodyStart = bodyStarts[0];
   const bodyClose = bodyCloses[0] || null;
   const bodyBodyStart = bodyStart.index + bodyStart[0].length;
-  const boundary = findExternalBoundary(source, bodyBodyStart, profile, structuralRanges);
-  const regionEnd = boundary ? boundary.index : source.length;
+  const layoutBounds = options.layoutBounds;
+  const boundary = layoutBounds ? layoutBounds.external : findExternalBoundary(source, bodyBodyStart, profile, structuralRanges);
+  const minimumEnd = Math.max(bodyBodyStart, layoutBounds?.lastInside ?? 0);
+  let regionEnd = boundary ? boundary.index : source.length;
+  // The existing close anchors the external tail when it already follows
+  // every configured inside group.
+  if (layoutBounds && bodyClose && bodyClose.index >= minimumEnd &&
+      bodyClose.index + bodyClose[0].length <= regionEnd) {
+    regionEnd = bodyClose.index + bodyClose[0].length;
+  } else if (layoutBounds && bodyClose && !boundary && minimumEnd > bodyClose.index) {
+    regionEnd = minimumEnd;
+  } else if (layoutBounds && !bodyClose && !boundary && layoutBounds.timeEnd?.start >= minimumEnd) {
+    regionEnd = layoutBounds.timeEnd.end;
+  }
+  if (layoutBounds && regionEnd < minimumEnd) return base;
 
   if (profile.time?.mode === 'none') {
-    if (!boundary) {
+    if (!boundary && !layoutBounds) {
       if (!bodyClose) {
         base.warnings.push('缺少正文结束分隔符，且没有配置可定位的外部标记；未猜测结束位置，已保留原文。');
       }
@@ -291,19 +317,10 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
       base.warnings.push('正文结束分隔符出现在开始分隔符之前，结构不明确；已保留原文。');
       return base;
     }
-    if (bodyClose && bodyClose.index <= boundary.index) return base;
-    const narrative = source.slice(bodyBodyStart, regionEnd).replace(/[ \t\r\n]+$/, '');
-    const closeText = profile.body.close;
-    const insertion = `${narrative}${narrative ? '\n' : ''}${closeText}\n`;
-    let after = source.slice(regionEnd);
-    if (bodyClose && bodyClose.index >= boundary.index) {
-      after = removeRanges(after, [{
-        start: bodyClose.index - regionEnd,
-        end: bodyClose.index + bodyClose[0].length - regionEnd,
-      }], { trimLines: true });
-    }
-    base.content = source.slice(0, bodyBodyStart) + insertion + after;
-    base.changed = true;
+    if (bodyClose && bodyClose.index >= minimumEnd && bodyClose.index <= regionEnd) return base;
+    const closeText = layoutBounds && bodyClose ? bodyClose[0] : profile.body.close;
+    base.content = rebuildBoundary(source, bodyBodyStart, regionEnd, '', closeText, [bodyClose]);
+    base.changed = base.content !== source;
     base.repairs = [bodyClose ? 'moved-body-close' : 'added-body-close'];
     return base;
   }
@@ -311,7 +328,6 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
   // SDC/custom time modes discover markers even when the marker is itself an
   // HTML comment. Comment examples are excluded unless the whole comment is
   // exactly the configured marker.
-  const markerCommentRanges = findHtmlCommentRanges(source);
   const markers = findTimeMarkers(source, profile, protectedRanges, markerCommentRanges);
   const { starts, ends } = markers;
   if (!starts.length && !ends.length) return base;
@@ -320,22 +336,24 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
     return base;
   }
   if (!starts.length) {
-    base.warnings.push('只发现时间结束标记而没有开始标记；不会凭空发明起始日期，已保留原文。');
-    return base;
+    base.warnings.push(layoutBounds
+      ? '缺少时间开始标记，请手动补上实际开始日期、星期和时间。'
+      : '只发现时间结束标记而没有开始标记；不会凭空发明起始日期，已保留原文。');
+    if (!layoutBounds) return base;
   }
-  const start = starts[0];
+  const start = starts[0] || null;
   const end = ends[0] || null;
-  if (bodyStart.index >= start.index) {
+  if (start && bodyBodyStart > start.index) {
     base.warnings.push('正文开始分隔符出现在时间开始标记之后，结构不明确；已保留原文。');
     return base;
   }
-  if (end && end.index < start.index + start[0].length) {
+  if (start && end && end.index < start.index + start[0].length) {
     base.warnings.push('时间结束标记出现在开始标记之前或内部，结构不明确；已保留原文。');
     return base;
   }
 
-  const endInside = end && end.index >= bodyBodyStart && end.index <= regionEnd;
-  const closeInside = bodyClose && bodyClose.index >= bodyBodyStart && bodyClose.index <= regionEnd;
+  const endInside = end && end.index >= minimumEnd && end.index <= regionEnd;
+  const closeInside = bodyClose && bodyClose.index >= minimumEnd && bodyClose.index <= regionEnd;
   const endToClose = end && bodyClose && end.index < bodyClose.index
     ? source.slice(end.index + end[0].length, bodyClose.index)
     : null;
@@ -345,7 +363,7 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
   // With no configured auxiliary marker, the body close itself ends the body.
   // Unknown content after it is external; do not extend the body to EOF just
   // because there is no known external marker.
-  const alreadyCorrect = alreadyCorrectPair && (boundary ? /^\s*$/.test(closeToBoundary) : true);
+  const alreadyCorrect = alreadyCorrectPair && (boundary && !layoutBounds ? /^\s*$/.test(closeToBoundary) : true);
   if (alreadyCorrect) return base;
 
   let endText = end ? end[0] : null;
@@ -375,27 +393,7 @@ export function repairProfileBodyBoundary(content, profile, options = {}) {
   }
 
   const closeText = bodyClose ? bodyClose[0] : profile.body.close;
-  const removals = [];
-  if (end) removals.push({ start: end.index, end: end.index + end[0].length });
-  if (bodyClose) removals.push({ start: bodyClose.index, end: bodyClose.index + bodyClose[0].length });
-
-  const narrative = source.slice(bodyBodyStart, regionEnd);
-  const narrativeRanges = removals
-    .filter(range => range.end > bodyBodyStart && range.start < regionEnd)
-    .map(range => ({
-      start: Math.max(range.start, bodyBodyStart) - bodyBodyStart,
-      end: Math.min(range.end, regionEnd) - bodyBodyStart,
-    }));
-  const narrativeClean = removeRanges(narrative, narrativeRanges, { trimLines: true });
-
-  const afterBoundary = source.slice(regionEnd);
-  const afterRanges = removals
-    .filter(range => range.end > regionEnd)
-    .map(range => ({ start: Math.max(range.start, regionEnd) - regionEnd, end: range.end - regionEnd }));
-  const afterClean = removeRanges(afterBoundary, afterRanges, { trimLines: true });
-
-  const tokenBlock = buildTokenBlock(narrativeClean, endText, closeText, !!boundary);
-  const repaired = source.slice(0, bodyBodyStart) + tokenBlock + (boundary ? afterClean : '');
+  const repaired = rebuildBoundary(source, bodyBodyStart, regionEnd, endText, closeText, [end, bodyClose]);
   if (repaired === source) return base;
 
   base.content = repaired;
@@ -738,12 +736,151 @@ export function repairProfileTrailingBlocks(content, profile, options = {}) {
   return base;
 }
 
+function readLayoutAnchors(source, profile) {
+  const protectedRanges = findProtectedRanges(source);
+  const comments = findHtmlCommentRanges(source, protectedRanges);
+  const ranges = mergeRanges([...protectedRanges, ...comments]);
+  const opens = findDelimiterMatches(source, profile.body.open, ranges);
+  const closes = findDelimiterMatches(source, profile.body.close, ranges, { open: false });
+  const { starts, ends } = findTimeMarkers(source, profile, protectedRanges, comments);
+  const span = match => match && { start: match.index, end: match.index + match[0].length };
+  return {
+    ranges,
+    exclude: [...opens, ...closes, ...starts, ...ends].map(span),
+    duplicate: [opens, closes, starts, ends].some(matches => matches.length > 1),
+    bodyOpen: span(opens[0]),
+    bodyClose: span(closes[0]),
+    timeStart: span(starts[0]),
+    timeEnd: span(ends[0]),
+  };
+}
+
+function layoutBounds(source, profile, state) {
+  let firstOutside = Infinity;
+  let lastInside = state.floor;
+  for (const node of state.roots) {
+    if (node.zone === 'inside') lastInside = Math.max(lastInside, node.close?.end ?? node.limit);
+    if (node.zone === 'outside') firstOutside = Math.min(firstOutside, node.open.start);
+  }
+  for (const marker of profile.auxiliaries) {
+    for (const match of findDelimiterMatches(source, marker, state.anchors.ranges)) {
+      if (match.index < state.floor) continue;
+      const belongsToGroup = state.roots.some(node => match.index < (node.close?.end ?? node.limit) &&
+        (match.index > node.open.start || (match.index === node.open.start && node.zone === 'inside')));
+      if (!belongsToGroup) firstOutside = Math.min(firstOutside, match.index);
+    }
+  }
+  return {
+    external: Number.isFinite(firstOutside) ? includeBoundarySeparator(source, { index: firstOutside }) : null,
+    lastInside,
+    timeEnd: state.anchors.timeEnd,
+  };
+}
+
+function repairExampleBoundary(source, profile, state, options) {
+  const { bodyOpen, bodyClose, timeStart, timeEnd, duplicate } = state.anchors;
+  const base = resultBase(source);
+  if (duplicate) {
+    base.warnings.push('正文或时间标记出现多次，请确认哪一组属于本次回复。');
+    return base;
+  }
+  if (!bodyOpen && !bodyClose) return base;
+  if (state.roots.some(node => node.zone === 'inside' && !node.close)) {
+    base.warnings.push('正文内有尚未闭合的结构块。请先开启结构块配对修复或补全该组。');
+    return base;
+  }
+  const bounds = layoutBounds(source, profile, state);
+  if (bounds.external && bounds.external.index < bounds.lastInside) {
+    base.warnings.push('正文内的组出现在正文外的组或辅助标记之后，无法安全确定正文边界。请同时开启结构块顺序修复，并检查示例和辅助标记。');
+    return base;
+  }
+  if (timeStart && bodyClose && !bodyOpen && timeStart.end > bodyClose.start) {
+    base.warnings.push('只找到正文结束标签，且开始时间在其后。请确认正文从哪里开始。');
+    return base;
+  }
+  let working = source;
+  if (!bodyOpen) {
+    // The configured body is the first group. When present, its start-time
+    // marker gives a precise insertion point after any prefix.
+    const position = timeStart?.start ?? (source.match(/^\s*/)?.[0].length ?? 0);
+    const eol = source.includes('\r\n') ? '\r\n' : '\n';
+    working = source.slice(0, position) + profile.body.open + eol + source.slice(position);
+    const shift = working.length - source.length;
+    if (bounds.external) bounds.external.index += shift;
+    bounds.lastInside += shift;
+    if (timeEnd) bounds.timeEnd = { start: timeEnd.start + shift, end: timeEnd.end + shift };
+  }
+  if (!timeStart && !timeEnd) profile = { ...profile, time: { mode: 'none' } };
+  const result = repairProfileBodyBoundary(working, profile, { ...options, layoutBounds: bounds });
+  if (!bodyOpen) result.repairs.unshift('added-body-open');
+  result.changed = result.content !== source;
+  if (result.changed) {
+    const checked = readLayoutAnchors(result.content, profile);
+    if (!checked.bodyOpen || !checked.bodyClose || checked.duplicate ||
+        (result.repairs.some(repair => repair.endsWith('time-end')) &&
+          (!checked.timeEnd || checked.timeEnd.end > checked.bodyClose.start))) {
+      base.warnings.push('正文结束位置落在代码或未闭合的注释中。请先补全该段，再修复正文边界。');
+      return base;
+    }
+  }
+  return result;
+}
+
+function repairWithTagLayout(source, profile, layout, options) {
+  const boundaryEnabled = !!options.bodyBoundaryEnabled;
+  const enabled = !!options.trailingOrderEnabled;
+  const readAnchors = text => readLayoutAnchors(text, profile);
+  if (readAnchors(source).duplicate) {
+    return {
+      ...resultBase(source),
+      warnings: ['正文或时间标记出现多次，请确认哪一组属于本次回复。'],
+      boundary: null,
+      trailing: null,
+      calendarResult: null,
+    };
+  }
+  const apply = crossBoundary => {
+    const { state, ...trailing } = repairLayoutBlocks(source, layout, { readAnchors, enabled, crossBoundary });
+    const boundary = boundaryEnabled ? repairExampleBoundary(trailing.content, profile, state, options) : null;
+    return { trailing, boundary, state };
+  };
+  const combined = boundaryEnabled && enabled;
+  let { trailing, boundary, state } = apply(combined);
+  // If an existing time or body boundary could not be repaired, keep any
+  // pairing and ordering that can be applied within the original regions.
+  if (combined && boundary.warnings.length && trailing.repairs.includes('reordered-blocks')) {
+    if (boundary.changed) {
+      state = repairLayoutBlocks(boundary.content, layout, { readAnchors, enabled: false }).state;
+    }
+    const close = state.anchors.bodyClose;
+    if (!close || state.roots.some(node => node.rule && node.close &&
+        (node.zone === 'inside' ? node.close.end > close.start : node.open.start < close.end))) {
+      ({ trailing, boundary } = apply(false));
+    }
+  }
+  const content = boundary?.content ?? trailing.content;
+  return {
+    content,
+    changed: content !== source,
+    warnings: uniqueWarnings([...trailing.warnings, ...(boundary?.warnings ?? [])]),
+    repairs: [...trailing.repairs, ...(boundary?.repairs ?? [])],
+    boundary,
+    trailing: enabled ? trailing : null,
+    calendarResult: boundary?.calendar ? {
+      ok: true, calendar: boundary.calendar, source: boundary.source, sourceLabel: boundary.sourceLabel,
+    } : options.calendarResult ?? null,
+  };
+}
+
 /**
- * One shared structure pass: body/time boundary first, then trailing blocks.
- * No second pass with hard-coded legacy tags occurs after a profile is chosen.
+ * Shared entry point for example layouts and profiles with a trailing block list.
  */
 export function repairWithProfile(content, profile, options = {}) {
   const source = typeof content === 'string' ? content : String(content ?? '');
+  if (profile?.layout) {
+    const parsed = parseTagLayout(profile.layout);
+    if (parsed.ok && parsed.layout) return repairWithTagLayout(source, profile, parsed.layout, options);
+  }
   let current = source;
   const warnings = [];
   const repairs = [];

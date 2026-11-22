@@ -95,15 +95,21 @@ export function findProtectedRanges(text) {
  * 找出 HTML 注释区间，供结构化标签/辅助内容扫描排除注释中的示例。
  * SDC 标记本身也是注释，调用方需要按用途决定是否排除，不能统一隐藏。
  * @param {string} text
+ * @param {Array<{start:number,end:number}>} [ignoredRanges]
  * @returns {Array<{start:number,end:number}>}
  */
-export function findHtmlCommentRanges(text) {
+export function findHtmlCommentRanges(text, ignoredRanges = []) {
   const source = String(text ?? '');
   const ranges = [];
   let cursor = 0;
   while (cursor < source.length) {
     const start = source.indexOf('<!--', cursor);
     if (start === -1) break;
+    const ignored = ignoredRanges.find(range => range.start <= start && start < range.end);
+    if (ignored) {
+      cursor = ignored.end;
+      continue;
+    }
     const close = source.indexOf('-->', start + 4);
     if (close === -1) {
       ranges.push({ start, end: source.length });

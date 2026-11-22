@@ -1,34 +1,49 @@
-// 纯推理块清理：只删除完整的 <think>/<thinking> 块，或“未闭合但后面有明确
-// <content> / SDC-start 锚点”的泄漏推理。代码围栏、行内代码与 <code>/<pre> 一律不改。
-import { findMatchesOutsideRanges, findProtectedRanges, removeRanges } from './text-scan.js';
+// Pure cleanup of the reasoning tags selected in a reply profile.
+import { findHtmlCommentRanges, findMatchesOutsideRanges, findProtectedRanges, removeRanges } from './text-scan.js';
 
-const REASONING_TAG_RE = /<(\/?)(think|thinking)\s*>/gi;
+export const DEFAULT_REASONING_BLOCK_TAGS = Object.freeze(['think', 'thinking']);
+const TAG_NAME_RE = /^[\p{L}][\p{L}\p{N}_.:~-]{0,59}$/u;
+const REASONING_TAG_RE = /<(\/?)([\p{L}][\p{L}\p{N}_.:~-]*)(?=[\s/>])([^"'<>]*(?:(?:"[^"]*"|'[^']*')[^"'<>]*)*)>/gu;
 const CLEAR_ANCHOR_RE = /<content\b[^>]*>|<!--\s*SDC-start\b/gi;
 
+export function normalizeReasoningTagName(value) {
+  if (typeof value !== 'string') return '';
+  const name = value.trim().replace(/^<\/?([^\s<>/]+)\s*>$/, '$1');
+  return TAG_NAME_RE.test(name) ? name.toLowerCase() : '';
+}
+
 function uncertainWarning(tagName) {
-  return `检测到未闭合的 <${tagName}>，其后没有明确的 <content> 或 SDC-start 锚点；为避免误删正文，已保留原文。请先确认推理内容边界后再手动处理。`;
+  return `检测到未闭合的 <${tagName}>，后面没有可确认的正文或时间起点。已保留原文，请检查推理块边界。`;
 }
 
 function malformedWarning() {
-  return '检测到交叉、错配或没有对应开始的推理标签，无法安全配对；已保留该处原文，请手动检查推理块边界。';
+  return '检测到交叉或错配的推理标签，无法安全配对；已保留该处原文，请手动检查推理块边界。';
 }
 
 function overlaps(left, right) {
   return left.start < right.end && right.start < left.end;
 }
 
-function analyzeTokens(text) {
+function analyzeTokens(text, blockTags, tagsOnly) {
   const ranges = findProtectedRanges(text);
-  const tokens = findMatchesOutsideRanges(text, REASONING_TAG_RE, ranges)
-    .map(match => ({
-      start: match.index,
-      end: match.index + match[0].length,
-      type: match[1] ? 'close' : 'open',
-      tag: match[2].toLowerCase(),
-    }));
+  const comments = findHtmlCommentRanges(text, ranges);
+  const tokens = [];
+  const stripTags = [];
+  const quotedTagRanges = [];
+  for (const match of findMatchesOutsideRanges(text, REASONING_TAG_RE, [...ranges, ...comments])) {
+    const [, closing, rawName, attributes] = match;
+    const tag = rawName.toLowerCase();
+    if (attributes.includes('<')) quotedTagRanges.push({ start: match.index, end: match.index + match[0].length });
+    if ((!blockTags.has(tag) && !tagsOnly.has(tag)) || (closing && attributes.trim())) continue;
+    const token = { start: match.index, end: match.index + match[0].length, type: closing ? 'close' : 'open', tag };
+    if (tagsOnly.has(tag) || (!closing && /\/\s*$/.test(attributes))) stripTags.push(token);
+    else tokens.push(token);
+  }
 
   const pairs = [];
   const malformed = [];
+  const looseClosings = [];
+  const uncertainClosings = new Set();
   const stack = [];
   for (const token of tokens) {
     if (token.type === 'open') {
@@ -36,7 +51,7 @@ function analyzeTokens(text) {
       continue;
     }
     if (!stack.length) {
-      malformed.push({ start: token.start, end: token.end });
+      if (!uncertainClosings.has(token.tag)) looseClosings.push(token);
       continue;
     }
     const top = stack[stack.length - 1];
@@ -47,6 +62,8 @@ function analyzeTokens(text) {
     }
     // 交叉配对（如 <think>…</thinking>）会让中间整段无法确定归属，保守保留。
     malformed.push({ start: stack[0].start, end: token.end });
+    for (const opening of stack) uncertainClosings.add(opening.tag);
+    uncertainClosings.add(token.tag);
     stack.length = 0;
   }
 
@@ -60,31 +77,39 @@ function analyzeTokens(text) {
 
   return {
     ranges,
-    tokens,
+    comments,
+    quotedTagRanges,
     malformed,
+    stripTags,
+    looseClosings,
     unmatchedOpenings: [...stack],
     removablePairs,
   };
 }
 
-function findAnchors(text, ranges, anchorPatterns, useDefaultAnchors = true) {
-  const defaults = useDefaultAnchors ? findMatchesOutsideRanges(text, CLEAR_ANCHOR_RE, ranges) : [];
-  if (!Array.isArray(anchorPatterns) || !anchorPatterns.length) return defaults;
-  const custom = [];
-  for (const pattern of anchorPatterns) {
+function findAnchors(text, { ranges, comments, quotedTagRanges }, anchorPatterns, useDefaultAnchors = true) {
+  const patterns = Array.isArray(anchorPatterns) ? [...anchorPatterns] : [];
+  if (useDefaultAnchors) patterns.unshift(CLEAR_ANCHOR_RE);
+  const anchors = [];
+  for (const pattern of patterns) {
     if (!(pattern instanceof RegExp)) continue;
     try {
-      custom.push(...findMatchesOutsideRanges(text, pattern, ranges));
+      const matches = findMatchesOutsideRanges(text, pattern, ranges);
+      anchors.push(...matches.filter(match =>
+        !quotedTagRanges.some(range => range.start < match.index && match.index < range.end) &&
+        !comments.some(range => range.start <= match.index && match.index < range.end &&
+          (range.start !== match.index || text.slice(range.end - 3, range.end) !== '-->'))));
     } catch {
       // Generated patterns are trusted; malformed optional patterns are ignored.
     }
   }
-  return [...defaults, ...custom].sort((left, right) => left.index - right.index);
+  return anchors.sort((left, right) => left.index - right.index);
 }
 
 /**
  * @param {string} content
- * @param {{maxIterations?:number, anchorPatterns?:RegExp[]}} options
+ * @param {{maxIterations?:number, anchorPatterns?:RegExp[], useDefaultAnchorPatterns?:boolean,
+ *   tagRules?:{blocks:string[],tagsOnly:string[]}, bodyTag?:string}} options
  * @returns {{content:string, changed:boolean, removedBlocks:number, removedLeaks:number, warnings:string[]}}
  */
 export function sanitizeLeakedReasoning(content, options = {}) {
@@ -97,9 +122,14 @@ export function sanitizeLeakedReasoning(content, options = {}) {
   let removedBlocks = 0;
   let removedLeaks = 0;
   const warnings = [];
+  const blockTags = new Set(options.tagRules?.blocks ?? DEFAULT_REASONING_BLOCK_TAGS);
+  const tagsOnly = new Set(options.tagRules?.tagsOnly ?? []);
+  blockTags.delete(options.bodyTag);
+  tagsOnly.delete(options.bodyTag);
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    const analysis = analyzeTokens(result);
+    if (!blockTags.size && !tagsOnly.size) break;
+    const analysis = analyzeTokens(result, blockTags, tagsOnly);
 
     if (analysis.removablePairs.length) {
       removedBlocks += analysis.removablePairs.length;
@@ -107,9 +137,19 @@ export function sanitizeLeakedReasoning(content, options = {}) {
       changed = true;
       continue;
     }
+    if (analysis.stripTags.length) {
+      result = removeRanges(result, analysis.stripTags);
+      changed = true;
+      continue;
+    }
+    if (analysis.looseClosings.length) {
+      result = removeRanges(result, analysis.looseClosings, { trimLines: true });
+      changed = true;
+      continue;
+    }
 
     // 没有可安全配对的完整块时，才处理“未闭合但后面有明确正文锚点”的泄漏。
-    const anchors = findAnchors(result, analysis.ranges, options.anchorPatterns,
+    const anchors = findAnchors(result, analysis, options.anchorPatterns,
       options.useDefaultAnchorPatterns !== false);
     let leak = null;
     for (const open of analysis.unmatchedOpenings) {

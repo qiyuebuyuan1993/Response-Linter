@@ -18,6 +18,7 @@ import { sanitizeLeakedReasoning } from './reasoning-sanitizer.js';
 import {
   buildProfileAnchorPatterns,
   readStructureProfiles,
+  tagNameOf,
 } from './structure-profiles.js';
 import { repairWithProfile } from './structure-repair.js';
 
@@ -64,6 +65,8 @@ export function transformContent(content, settings, ctx = null) {
     const reasoning = sanitizeLeakedReasoning(current, {
       anchorPatterns: buildProfileAnchorPatterns(profile),
       useDefaultAnchorPatterns: false,
+      tagRules: profile.reasoning,
+      bodyTag: tagNameOf(profile.body?.open),
     });
     details.reasoning = reasoning;
     if (reasoning.warnings.length) warnings.push(...reasoning.warnings);

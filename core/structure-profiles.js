@@ -6,6 +6,8 @@ import {
   DEFAULT_DETAILS_CHOICES_KEYWORD,
   DEFAULT_DETAILS_MONOLOGUE_KEYWORD,
 } from './details-repair.js';
+import { parseTagLayout } from './tag-layout.js';
+import { DEFAULT_REASONING_BLOCK_TAGS, normalizeReasoningTagName } from './reasoning-sanitizer.js';
 
 export const STRUCTURE_PROFILES_VERSION = 1;
 export const STRUCTURE_PROFILES_MIGRATION_KEY = 'structureProfilesMigrationVersion';
@@ -26,10 +28,38 @@ export const MAX_MARKER_FIELD = 200;
 const TIME_MODES = ['none', 'sdc', 'custom'];
 const LEGACY_TIME_START = '<!-- SDC-start | date={date} | weekday={weekday} | time={time} -->';
 const LEGACY_TIME_END = '<!-- SDC-end | date={date} | weekday={weekday} | time={time} -->';
+const MAX_REASONING_TAGS = 24;
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function checkReasoningTags(input, bodyTag) {
+  if (input == null) return { ok: true };
+  if (!isPlainObject(input)) return { ok: false, error: '推理标签设置必须是对象。' };
+  const reasoning = {};
+  for (const [key, label] of [['blocks', '整段清理'], ['tagsOnly', '只删标签']]) {
+    const entries = input[key] ?? [];
+    if (!Array.isArray(entries) || entries.length > MAX_REASONING_TAGS) {
+      return { ok: false, error: `${label}最多可配置 ${MAX_REASONING_TAGS} 个标签。` };
+    }
+    const names = entries.map(normalizeReasoningTagName);
+    if (names.some(name => !name)) {
+      return { ok: false, error: `${label}请每行填写一个标签名，如 thinking 或 <konatan_planning~>。` };
+    }
+    if (bodyTag && names.includes(bodyTag)) {
+      return { ok: false, error: '推理标签与当前正文标签相同，请从推理标签列表里移除它。' };
+    }
+    reasoning[key] = [...new Set(names)];
+  }
+  if (reasoning.blocks.some(name => reasoning.tagsOnly.includes(name))) {
+    return { ok: false, error: '同一个推理标签只能选一种清理方式，请从其中一个列表移除它。' };
+  }
+  const defaults = reasoning.tagsOnly.length === 0 &&
+    reasoning.blocks.length === DEFAULT_REASONING_BLOCK_TAGS.length &&
+    DEFAULT_REASONING_BLOCK_TAGS.every(name => reasoning.blocks.includes(name));
+  return { ok: true, reasoning: defaults ? undefined : reasoning };
 }
 
 function hasForbiddenKey(value, depth = 0, seen = new WeakSet()) {
@@ -164,7 +194,7 @@ export function buildDelimiterPattern(delimiter, { open = true, capture = false 
   const tagName = tagNameOf(text);
   if (tagName) {
     return open
-      ? `<\\s*${escapeRegExp(tagName)}(?=[\\s/>])[^>]*>`
+      ? `<\\s*${escapeRegExp(tagName)}(?=[\\s/>])(?:[^"'<>]|"[^"]*"|'[^']*')*>`
       : `</\\s*${escapeRegExp(tagName)}\\s*>`;
   }
   return capture ? `(${escapeRegExp(text)})` : escapeRegExp(text);
@@ -281,7 +311,9 @@ export function validateStructureProfile(input, { fallbackId = '', allowMissingI
     return { ok: false, error: `不支持的结构配置档案版本：${String(input.version)}` };
   }
 
-  const body = isPlainObject(input.body) ? input.body : {};
+  const example = parseTagLayout(input.layout);
+  if (!example.ok) return example;
+  const body = example.layout?.body ?? (isPlainObject(input.body) ? input.body : {});
   const bodyOpenCheck = checkText(body.open, '正文开始分隔符', MAX_PROFILE_TEXT, { required: true });
   if (!bodyOpenCheck.ok) return bodyOpenCheck;
   const bodyCloseCheck = checkText(body.close, '正文结束分隔符', MAX_PROFILE_TEXT, { required: true });
@@ -295,9 +327,12 @@ export function validateStructureProfile(input, { fallbackId = '', allowMissingI
       (!bodyOpenTag || !bodyCloseTag || bodyOpenTag !== bodyCloseTag)) {
     return { ok: false, error: '正文开始/结束标签必须使用同名成对标签（大小写不敏感）' };
   }
+  const reasoning = checkReasoningTags(input.reasoning, bodyOpenTag);
+  if (!reasoning.ok) return reasoning;
 
   const timeInput = isPlainObject(input.time) ? input.time : {};
-  const mode = String(timeInput.mode ?? 'none').trim().toLowerCase();
+  const requestedMode = String(timeInput.mode ?? 'none').trim().toLowerCase();
+  const mode = requestedMode === 'none' && example.layout?.hasSdc ? 'sdc' : requestedMode;
   if (!TIME_MODES.includes(mode)) return { ok: false, error: `未知时间模式「${String(timeInput.mode)}」` };
   let startTemplate = '';
   let endTemplate = '';
@@ -454,6 +489,8 @@ export function validateStructureProfile(input, { fallbackId = '', allowMissingI
       time: { mode, startTemplate, endTemplate },
       auxiliaries,
       blocks,
+      ...(example.layout ? { layout: example.text } : {}),
+      ...(reasoning.reasoning ? { reasoning: reasoning.reasoning } : {}),
     },
   };
 }
@@ -776,5 +813,6 @@ export function describeStructureProfile(profile) {
     : profile.time.mode === 'sdc'
       ? 'SDC 时间标记'
       : '自定义时间模板';
-  return `${profile.name} · 正文 ${profile.body.open}…${profile.body.close} · ${time} · ${profile.blocks.length} 个末尾结构块`;
+  const structure = profile.layout ? '按标签示例排列' : `${profile.blocks.length} 个末尾结构块`;
+  return `${profile.name} · 正文 ${profile.body.open}…${profile.body.close} · ${time} · ${structure}`;
 }
