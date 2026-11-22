@@ -71,7 +71,7 @@
       <div class="rl-control-group">
         <label class="checkbox_label" for="rl-repair-details-order">
           <input id="rl-repair-details-order" type="checkbox" />
-          <span>修复正文外结构块顺序与配对</span>
+          <span>修复结构块顺序与配对</span>
         </label>
       </div>
     </fieldset>
@@ -81,7 +81,32 @@
         <label for="rl-profile-name">档案名称</label>
         <input id="rl-profile-name" type="text" class="text_pole" maxlength="60" spellcheck="false" />
       </div>
-      <div class="rl-profile-grid">
+      <details class="rl-disclosure">
+        <summary>要清理的推理标签</summary>
+        <div class="rl-disclosure-body">
+          <p class="rl-help-text">开启「清理泄漏的推理块」后，使用当前档案里的列表。每行填一个标签名，例如 <code>konatan_planning~</code>。填完整的 <code>&lt;konatan_planning~&gt;</code> 也可以。</p>
+          <div class="rl-form-group">
+            <label for="rl-profile-reasoning-blocks">整段清理的推理标签</label>
+            <textarea id="rl-profile-reasoning-blocks" class="text_pole" rows="3" spellcheck="false" aria-describedby="rl-profile-reasoning-blocks-help"></textarea>
+            <p id="rl-profile-reasoning-blocks-help" class="rl-help-text">成对时连内容一起删。落单的结束标签只删标签。缺少结束标签时，有明确的正文或时间起点才清理整段。</p>
+          </div>
+          <div class="rl-form-group">
+            <label for="rl-profile-reasoning-tags-only">只删标签，保留里面的文字</label>
+            <textarea id="rl-profile-reasoning-tags-only" class="text_pole" rows="2" spellcheck="false" placeholder="选填，每行一个"></textarea>
+          </div>
+        </div>
+      </details>
+      <details id="rl-profile-layout-section" class="rl-disclosure">
+        <summary>按示例设置标签排列</summary>
+        <div class="rl-disclosure-body rl-form-group">
+          <label for="rl-profile-layout">正确的标签排列示例</label>
+          <p id="rl-profile-layout-help" class="rl-help-text">缩进表示包含关系。示例中的 &lt;status_qyl&gt; 包住自己那组 &lt;details&gt;，它们一起留在正文里。写在 &lt;/content&gt; 后面的组属于正文外。标题文字可以随回复变化。</p>
+          <p id="rl-profile-layout-time" class="rl-help-text">使用 SDC 时，顺序是正文开头 → SDC-start → 正文及内侧组 → SDC-end → 正文结束。保存后会按所选时间模式显示标记的位置。</p>
+          <textarea id="rl-profile-layout" class="text_pole" rows="12" maxlength="24000" spellcheck="false" aria-describedby="rl-profile-layout-help rl-profile-layout-time" placeholder="&lt;content&gt;&#10;  &lt;!-- SDC-start | date=1年夏6日 | weekday=周六 | time=20:10 --&gt;&#10;  正文……&#10;  &lt;status_qyl&gt;&#10;    &lt;details&gt;&lt;summary&gt;可变标题&lt;/summary&gt;内容……&lt;/details&gt;&#10;  &lt;/status_qyl&gt;&#10;  &lt;!-- SDC-end | date=1年夏6日 | weekday=周六 | time=20:35 --&gt;&#10;&lt;/content&gt;&#10;&lt;status_xssq&gt;&#10;  &lt;details&gt;&lt;summary&gt;可变标题&lt;/summary&gt;内容……&lt;/details&gt;&#10;&lt;/status_xssq&gt;&#10;&lt;details&gt;&lt;summary&gt;独立块的标题&lt;/summary&gt;内容……&lt;/details&gt;"></textarea>
+          <p class="rl-help-text">相邻同名组会保留彼此的顺序。要区分它们，可在示例和回复中使用不同外层标签或 id。整对缺席会跳过，只出现一半时按相邻结构补齐。清空示例并保存可切回末尾结构块列表。</p>
+        </div>
+      </details>
+      <div id="rl-profile-legacy-body" class="rl-profile-grid">
         <div class="rl-form-group">
           <label for="rl-profile-body-open">正文开始分隔符</label>
           <input id="rl-profile-body-open" type="text" class="text_pole" spellcheck="false" placeholder="&lt;content&gt;" />
@@ -112,9 +137,9 @@
       <div class="rl-form-group">
         <label for="rl-profile-auxiliaries">外部辅助标记（每行一个，可选）</label>
         <textarea id="rl-profile-auxiliaries" class="text_pole" rows="3" spellcheck="false" aria-describedby="rl-profile-auxiliaries-help" placeholder="&lt;版权水印&gt;&#10;&lt;details&gt;"></textarea>
-        <p id="rl-profile-auxiliaries-help" class="rl-help-text">用于识别正文外内容的起点，帮助“修复正文 / 时间边界”把正文结束分隔符放到这些内容之前；不会删除标记或其后的内容。每行填写一个实际使用的标记，例如 &lt;版权水印&gt;、&lt;details&gt;，不要填写正文中也会出现的标记。SDC-end 始终放在正文结束分隔符之前。块的排序与配对请在下方“末尾结构块顺序”配置。</p>
+        <p id="rl-profile-auxiliaries-help" class="rl-help-text">每行填一个额外的正文外起点，例如 &lt;版权水印&gt;。已经在示例中设置的外部组会自动作为边界。SDC-end 放在正文结束分隔符之前。</p>
       </div>
-      <div class="rl-form-group">
+      <div id="rl-profile-legacy-blocks" class="rl-form-group">
         <label>末尾结构块顺序（从上到下为期望顺序）</label>
         <div id="rl-profile-blocks-list" class="rl-profile-blocks-list"></div>
         <button id="rl-profile-add-block" class="menu_button secondary small" type="button">
@@ -154,9 +179,10 @@
     <details class="rl-disclosure">
       <summary>修复规则说明</summary>
       <div class="rl-disclosure-body rl-short-help">
-        <p><strong>推理清理：</strong>删除完整的 &lt;think&gt; / &lt;thinking&gt; 块；未闭合块只在当前档案的正文或时间起点前明确出现时删除。代码围栏与行内代码不改。</p>
+        <p><strong>推理清理</strong>按当前档案中选择的标签处理。旧档案默认清理 &lt;think&gt; 和 &lt;thinking&gt;。代码和注释里的示例会保留。</p>
         <p><strong>正文 / 时间边界：</strong>按当前档案移动正文结束分隔符与时间结束标记；已有时间结束逐字节保留，缺失时才按历法推进合成。无时间模式不读取历法。</p>
         <p><strong>末尾结构块：</strong>只重排完整、唯一、顶层且匹配当前档案的结构块；中间文字、未知块、嵌套结构与归属不明的内容保持原样。缺少闭合时只在明确的并列结构下补齐。</p>
+        <p><strong>标签排列示例：</strong>可配置正文内外的嵌套组。需要跨正文边界时同时开启正文边界和结构块修复。时间结束标记仍位于正文闭合标签之前。</p>
         <p>自定义 HTML 标签用于千千结/构画时，需要在这些插件自己的共享正文包装设置中配置相同标签；本扩展不会修改它们。</p>
       </div>
     </details>
