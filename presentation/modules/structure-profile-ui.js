@@ -9,6 +9,8 @@ import {
   readStructureProfiles,
   validateStructureProfile,
 } from '../../core/structure-profiles.js';
+import { formatTagLayoutForEditor } from '../../core/tag-layout.js';
+import { DEFAULT_REASONING_BLOCK_TAGS } from '../../core/reasoning-sanitizer.js';
 
 function nowId(prefix = 'custom') {
   const random = Math.random().toString(36).slice(2, 8);
@@ -62,6 +64,11 @@ export class StructureProfileUI {
         this.dirty = true;
         this.updateTimeVisibility();
       });
+    document.getElementById('rl-profile-layout')
+      ?.addEventListener('input', () => {
+        this.dirty = true;
+        this.updateLayoutVisibility();
+      });
     document.getElementById('rl-profile-blocks-list')
       ?.addEventListener('click', event => {
         const button = event.target?.closest?.('button[data-rl-block-action]');
@@ -72,6 +79,7 @@ export class StructureProfileUI {
     for (const id of [
       'rl-profile-name', 'rl-profile-body-open', 'rl-profile-body-close',
       'rl-profile-time-start', 'rl-profile-time-end', 'rl-profile-auxiliaries',
+      'rl-profile-reasoning-blocks', 'rl-profile-reasoning-tags-only',
     ]) {
       document.getElementById(id)?.addEventListener('input', () => { this.dirty = true; });
     }
@@ -137,6 +145,9 @@ export class StructureProfileUI {
       if (element) element.value = asText(value);
     };
     set('rl-profile-name', draft.name);
+    set('rl-profile-layout', formatTagLayoutForEditor(draft.layout, draft.time?.mode));
+    set('rl-profile-reasoning-blocks', (draft.reasoning?.blocks ?? DEFAULT_REASONING_BLOCK_TAGS).join('\n'));
+    set('rl-profile-reasoning-tags-only', (draft.reasoning?.tagsOnly ?? []).join('\n'));
     set('rl-profile-body-open', draft.body?.open);
     set('rl-profile-body-close', draft.body?.close);
     set('rl-profile-time-mode', draft.time?.mode || 'none');
@@ -145,6 +156,9 @@ export class StructureProfileUI {
     set('rl-profile-auxiliaries', (draft.auxiliaries || []).join('\n'));
     this.renderBlocks(draft);
     this.updateTimeVisibility();
+    this.updateLayoutVisibility();
+    const layoutSection = document.getElementById('rl-profile-layout-section');
+    if (layoutSection && draft.layout) layoutSection.open = true;
     const remove = document.getElementById('rl-profile-remove');
     if (remove) remove.disabled = this.profiles.length <= 1;
   }
@@ -214,8 +228,22 @@ export class StructureProfileUI {
     }
   }
 
+  updateLayoutVisibility() {
+    const hasExample = !!document.getElementById('rl-profile-layout')?.value?.trim();
+    for (const id of ['rl-profile-legacy-body', 'rl-profile-legacy-blocks']) {
+      const element = document.getElementById(id);
+      if (element) element.hidden = hasExample;
+    }
+  }
+
   captureDraftFromForm() {
     const value = id => document.getElementById(id)?.value ?? '';
+    const lines = text => text.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    const blockTags = document.getElementById('rl-profile-reasoning-blocks');
+    const tagsOnly = document.getElementById('rl-profile-reasoning-tags-only');
+    const reasoning = blockTags && tagsOnly
+      ? { blocks: lines(blockTags.value), tagsOnly: lines(tagsOnly.value) }
+      : this.currentDraft?.reasoning;
     const blocks = [];
     const list = document.getElementById('rl-profile-blocks-list');
     if (list) {
@@ -238,6 +266,8 @@ export class StructureProfileUI {
       version: STRUCTURE_PROFILES_VERSION,
       id: this.currentDraft?.id || this.currentDraftId || nowId(),
       name: value('rl-profile-name').trim(),
+      layout: value('rl-profile-layout'),
+      reasoning,
       builtin: false,
       body: { open: value('rl-profile-body-open'), close: value('rl-profile-body-close') },
       time: {
@@ -245,7 +275,7 @@ export class StructureProfileUI {
         startTemplate: value('rl-profile-time-start'),
         endTemplate: value('rl-profile-time-end'),
       },
-      auxiliaries: value('rl-profile-auxiliaries').split(/\r?\n/).map(item => item.trim()).filter(Boolean),
+      auxiliaries: lines(value('rl-profile-auxiliaries')),
       blocks,
     };
   }

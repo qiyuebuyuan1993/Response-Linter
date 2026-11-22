@@ -1962,6 +1962,16 @@ body.rl-modal-open { overflow: hidden !important; }
   margin: 8px 0;
 }
 
+#rl-profile-legacy-body[hidden],
+#rl-profile-legacy-blocks[hidden] {
+  display: none !important;
+}
+
+#rl-profile-layout {
+  text-align: start;
+  font-family: var(--monoFontFamily, monospace);
+}
+
 .rl-profile-block {
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 7px;

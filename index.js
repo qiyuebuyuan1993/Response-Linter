@@ -1,4 +1,4 @@
-// Response Linter 1.4.14 — streamlined structure-repair edition.
+// Response Linter 1.4.17 — customizable tag layout and reasoning cleanup.
 // Only the three structure-repair features, editable reply-structure profiles,
 // calendar awareness, Quick Reply/wand/drawer entry points and manual/auto
 // repair/undo are active. Legacy generic validation rules are archived inertly
@@ -59,7 +59,7 @@ const __getCtx = () => getFreshContext();
 const extensionName = 'response-linter';
 const extensionFolderPath = new URL('.', import.meta.url).pathname.replace(/\/$/, '');
 
-try { console.info('[Response Linter] 1.4.14 streamlined index loaded'); } catch {}
+try { console.info('[Response Linter] 1.4.17 index loaded'); } catch {}
 
 function getSettingsRoot() {
   try {
@@ -744,7 +744,7 @@ async function showStructureConfirmation(detail) {
   const strategyNames = {
     'remove-leaked-reasoning': '清理泄漏推理',
     'sdc-content-boundary': '修复正文 / 时间边界',
-    'details-outside-content-order': '修复末尾块顺序与配对',
+    'details-outside-content-order': '修复结构块顺序与配对',
   };
   const strategyLabel = String(detail.strategy || '').split(' | ').map(name => strategyNames[name] || name).join('、') || '结构修复';
   const warningHtml = warnings.length
@@ -998,9 +998,9 @@ jQuery(async () => {
     }, 8000);
 
     window.ResponseLinter = window.ResponseLinter || {};
-    window.ResponseLinter.version = '1.4.14';
+    window.ResponseLinter.version = '1.4.17';
     window.ResponseLinter.backendController = backendController;
-    console.info('[Response Linter] 1.4.14 初始化完成');
+    console.info('[Response Linter] 1.4.17 初始化完成');
   } catch (error) {
     console.error('[Response Linter] 扩展初始化失败:', error);
     showSettingsToast('error', '响应检查器扩展加载失败');
