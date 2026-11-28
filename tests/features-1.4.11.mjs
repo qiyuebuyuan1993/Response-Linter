@@ -337,7 +337,7 @@ test('CSS keeps themed checkbox dimensions and native wand alignment', () => {
 test('manifest and runtime advertise the same release version', () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   const index = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  assert.equal(manifest.version, '1.4.17');
+  assert.equal(manifest.version, '1.4.18');
   assert.ok(index.includes("window.ResponseLinter.version = '" + manifest.version + "'"));
   assert.ok(index.includes(manifest.version + ' index loaded'));
 });
