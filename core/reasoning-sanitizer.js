@@ -142,15 +142,27 @@ export function sanitizeLeakedReasoning(content, options = {}) {
       changed = true;
       continue;
     }
+    const anchors = findAnchors(result, analysis, options.anchorPatterns,
+      options.useDefaultAnchorPatterns !== false);
     if (analysis.looseClosings.length) {
-      result = removeRanges(result, analysis.looseClosings, { trimLines: true });
+      const anchorStart = anchors[0]?.index;
+      const leadingClose = anchorStart === undefined ? null
+        : analysis.looseClosings.filter(token => token.end <= anchorStart).at(-1);
+      let prefixEnd = 0;
+      // 第一个正文或时间起点前的落单闭合标签，可以界定开头残留的推理。
+      if (leadingClose && !analysis.malformed.some(range => range.start < leadingClose.end)) {
+        prefixEnd = result.slice(leadingClose.end, anchorStart).trim() ? leadingClose.end : anchorStart;
+        removedLeaks++;
+      }
+      const remainingClosings = analysis.looseClosings
+        .filter(token => token.start >= prefixEnd)
+        .map(token => ({ start: token.start - prefixEnd, end: token.end - prefixEnd }));
+      result = removeRanges(result.slice(prefixEnd), remainingClosings, { trimLines: true });
       changed = true;
       continue;
     }
 
     // 没有可安全配对的完整块时，才处理“未闭合但后面有明确正文锚点”的泄漏。
-    const anchors = findAnchors(result, analysis, options.anchorPatterns,
-      options.useDefaultAnchorPatterns !== false);
     let leak = null;
     for (const open of analysis.unmatchedOpenings) {
       const anchor = anchors.find(match => match.index >= open.end);
