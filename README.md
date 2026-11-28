@@ -1,16 +1,18 @@
-# 响应检查器 Response Linter 1.4.17
+# 响应检查器 Response Linter 1.4.18
 
 基于 [il1umi/Response-Linter](https://github.com/il1umi/Response-Linter) 的个人维护分支。
 
 1.4.10 是**精简版**：只保留回复结构修复。旧的通用验证规则、规则模板、规则编辑器、配置向导、旧诊断和统计界面已从生产路径移除。旧规则会一次性归档为不可执行的数据备份，不会被任何消息处理器、后端控制器或修复协调器执行。
 
-![版本](https://img.shields.io/badge/版本-1.4.17-blue.svg)
+![版本](https://img.shields.io/badge/版本-1.4.18-blue.svg)
 ![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-blue.svg)
 ![SillyTavern](https://img.shields.io/badge/SillyTavern-兼容-brightgreen.svg)
 
 ## 当前功能
 
-**1.4.17 自定义推理标签。** 档案可分别选择整段清理和只删标签。支持 `konatan_planning~` 等名称。落单的结束标签会保留周围文字，只移除标签。
+**1.4.18 清理开头残留的推理。** 当「整段清理」列表里的结束标签落单，且位于第一个有效的正文或时间起点之前，会删掉从回复开头到该标签的内容。正文里或找不到有效起点时，只移除落单的标签。
+
+**1.4.17 自定义推理标签。** 档案可分别选择整段清理和只删标签。支持 `konatan_planning~` 等名称。
 
 **1.4.16 标签示例说明。** 保存档案后，示例会标明正文内外及时间标记的位置，并用缩进展示标签包裹关系。
 

@@ -88,7 +88,7 @@
           <div class="rl-form-group">
             <label for="rl-profile-reasoning-blocks">整段清理的推理标签</label>
             <textarea id="rl-profile-reasoning-blocks" class="text_pole" rows="3" spellcheck="false" aria-describedby="rl-profile-reasoning-blocks-help"></textarea>
-            <p id="rl-profile-reasoning-blocks-help" class="rl-help-text">成对时连内容一起删。落单的结束标签只删标签。缺少结束标签时，有明确的正文或时间起点才清理整段。</p>
+            <p id="rl-profile-reasoning-blocks-help" class="rl-help-text">成对时连内容一起删。落单的结束标签位于首个正文或时间起点前时，连同前面的残留一起删。正文内或找不到起点时，只删标签。只有开始标签时，需要明确起点才能清理整段。</p>
           </div>
           <div class="rl-form-group">
             <label for="rl-profile-reasoning-tags-only">只删标签，保留里面的文字</label>

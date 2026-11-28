@@ -1,4 +1,4 @@
-// Response Linter 1.4.17 — customizable tag layout and reasoning cleanup.
+// Response Linter 1.4.18 — customizable tag layout and reasoning cleanup.
 // Only the three structure-repair features, editable reply-structure profiles,
 // calendar awareness, Quick Reply/wand/drawer entry points and manual/auto
 // repair/undo are active. Legacy generic validation rules are archived inertly
@@ -59,7 +59,7 @@ const __getCtx = () => getFreshContext();
 const extensionName = 'response-linter';
 const extensionFolderPath = new URL('.', import.meta.url).pathname.replace(/\/$/, '');
 
-try { console.info('[Response Linter] 1.4.17 index loaded'); } catch {}
+try { console.info('[Response Linter] 1.4.18 index loaded'); } catch {}
 
 function getSettingsRoot() {
   try {
@@ -998,9 +998,9 @@ jQuery(async () => {
     }, 8000);
 
     window.ResponseLinter = window.ResponseLinter || {};
-    window.ResponseLinter.version = '1.4.17';
+    window.ResponseLinter.version = '1.4.18';
     window.ResponseLinter.backendController = backendController;
-    console.info('[Response Linter] 1.4.17 初始化完成');
+    console.info('[Response Linter] 1.4.18 初始化完成');
   } catch (error) {
     console.error('[Response Linter] 扩展初始化失败:', error);
     showSettingsToast('error', '响应检查器扩展加载失败');
